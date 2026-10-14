@@ -16,6 +16,17 @@
 \usepackage[hidelinks]{hyperref}
 
 \graphicspath{{figures/}}
+% Let floats sit near their first reference instead of piling up at the end
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.8}
+\renewcommand{\dbltopfraction}{0.9}
+\renewcommand{\dblfloatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+\setcounter{dbltopnumber}{2}
 \definecolor{orblue}{HTML}{2A78D6}
 \makeatletter
 \newcommand{\linebreakand}{%
@@ -95,7 +106,7 @@ We therefore build the LP strictly from \emph{area}, \emph{production} and \emph
 using output maximisation and land minimisation only. Cost and profit are left out rather
 than approximated, which keeps the model reproducible from a public dataset.
 
-\begin{table}[t]
+\begin{table}[!t]
 \centering
 \caption{Related work}\label{tab:lit}
 \setlength{\tabcolsep}{3pt}
@@ -111,6 +122,15 @@ Liang~\cite{liang2023} & LP & Production--land allocation & LP land-allocation f
 \bottomrule
 \end{tabular}
 \end{table}
+
+% full-width floats must be defined one page before they should appear
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=\textwidth]{fig_stacked_source}
+\caption{(a) Records per year. (b) Raw pooled yield $\sum P/\sum A$, which mixes two
+scales. (c) Pooled yield after removing the duplicate copy, in t/ha.}
+\label{fig:stacked}
+\end{figure*}
 
 % =====================================================================
 \section{Dataset}
@@ -132,7 +152,7 @@ Yield $=$ Production$/$Area.
   \item 1997 and 2020 are partial years, so the analysis window is 1998--2019.
 \end{itemize}
 
-\begin{table}[t]
+\begin{table}[!t]
 \centering
 \caption{Data cleaning}\label{tab:clean}
 \begin{tabular}{@{}lr@{}}
@@ -147,14 +167,6 @@ Clean rows & 358{,}739\\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{fig_stacked_source}
-\caption{(a) Records per year. (b) Raw pooled yield $\sum P/\sum A$, which mixes two
-scales. (c) Pooled yield after removing the duplicate copy, in t/ha.}
-\label{fig:stacked}
-\end{figure*}
 
 % =====================================================================
 \section{Formulation}
@@ -193,7 +205,7 @@ are solved with PuLP and SciPy \texttt{linprog} (the two agree), visualisation u
 Matplotlib and Plotly, and an interactive interface lets users upload data and run both
 models.
 
-\begin{figure}[t]
+\begin{figure}[!t]
 \centering
 \begin{tikzpicture}[node distance=2mm,
   box/.style={draw=orblue, rounded corners=2pt, fill=orblue!6, text width=0.86\columnwidth,
@@ -213,13 +225,21 @@ models.
 \label{fig:workflow}
 \end{figure}
 
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=\textwidth]{fig_parametric_land}
+\caption{(a) Optimal output versus land budget $L$. (b) Value of one extra hectare. The
+dotted line marks the historical land.}
+\label{fig:param}
+\end{figure*}
+
 % =====================================================================
 \section{Results: Karnataka, Kharif, 1998--2019}
 % =====================================================================
 Nineteen weight-unit crops with at least 15 years of data enter the LP. Mesta and Cotton are
 excluded because they are reported in bales. Table~\ref{tab:res} summarises both models.
 
-\begin{table}[t]
+\begin{table}[!t]
 \centering
 \caption{Optimal vs.\ historical allocation}\label{tab:res}
 \begin{tabular}{@{}lrr@{}}
@@ -245,7 +265,7 @@ The value of one extra hectare (the land dual) is 0.81\,t.
 The dual of the target is 0.3806\,ha/t. This equals the reciprocal of the land dual of
 Opt.~1 at that land level, which confirms the primal/dual pairing.
 
-\begin{figure}[t]
+\begin{figure}[!t]
 \centering
 \includegraphics[width=\columnwidth]{fig_opt1_allocation}
 \caption{Optimization~1: historical versus optimal hectares per crop. Ticks mark the
@@ -268,15 +288,7 @@ which is consistent with the 3.75--15\% reported in~\cite{supriya2022}.
 25.8\% (Fig.~\ref{fig:multi}). The gain is highest in the diverse dry districts (Koppal
 +65\%, Gadag +55\%) and lowest in the coastal rice districts (Udupi +0.2\%).
 
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{fig_parametric_land}
-\caption{(a) Optimal output versus land budget $L$. (b) Value of one extra hectare. The
-dotted line marks the historical land.}
-\label{fig:param}
-\end{figure*}
-
-\begin{figure}[t]
+\begin{figure}[!t]
 \centering
 \includegraphics[width=\columnwidth]{fig_multi_district}
 \caption{Output gain and land saving by district.}
