@@ -2,7 +2,7 @@
 webapp/server.py — FastAPI backend for the CropLP web interface.
 
 All computation is delegated to ../or_core.py (the same engine used by the
-report, the IEEE paper and the Streamlit prototype), so every number shown in
+report and the IEEE paper), so every number shown in
 the browser is identical to the documented results.
 
 Run:   python webapp/server.py        (opens http://127.0.0.1:8000)

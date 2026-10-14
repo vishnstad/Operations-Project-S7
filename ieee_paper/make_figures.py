@@ -39,7 +39,6 @@ plt.rcParams.update({
 
 def save(fig, name):
     fig.savefig(FIG / f"{name}.pdf")
-    fig.savefig(FIG / f"{name}.png", dpi=300)
     plt.close(fig)
 
 
@@ -77,28 +76,8 @@ def main():
     feas = oc.feasibility_bounds(coef)
     r1, r2 = oc.solve_max_output(coef, L), oc.solve_min_land(coef, D)
 
-    # Fig: unit check (single column, log scale)
-    u = unit.sort_values("median_yield")
-    fig, ax = plt.subplots(figsize=(COL, 3.6))
-    colors = [ORANGE if s == "Exclude" else BLUE for s in u["status"]]
-    ax.barh(u["Crop"], u["median_yield"], color=colors, height=0.7)
-    ax.set_xscale("log"); ax.set_xlabel("Median row-level yield (log scale)")
-    ax.grid(axis="y", alpha=0)
-    ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=BLUE), plt.Rectangle((0, 0), 1, 1, color=ORANGE)],
-              labels=["pooled (weight unit)", "excluded (bales)"], frameon=False, loc="lower right")
-    save(fig, "fig_unit_check")
-
-    # Fig: coefficients
-    c = coef.sort_values("y_c")
-    fig, ax = plt.subplots(figsize=(COL, 2.9))
-    ax.barh(c["Crop"], c["y_c"], xerr=c["yield_sd"], color=BLUE, height=0.7,
-            error_kw=dict(ecolor=GRAY, lw=0.8, capsize=1.5))
-    ax.set_xlabel(r"Yield coefficient $y_c$ (t/ha), mean $\pm$ s.d. over years")
-    ax.grid(axis="y", alpha=0)
-    save(fig, "fig_coefficients")
-
-    # Fig: allocations (single column each)
-    for r, name in [(r1, "fig_opt1_allocation"), (r2, "fig_opt2_allocation")]:
+    # Fig: Opt 1 allocation (single column)
+    for r, name in [(r1, "fig_opt1_allocation")]:
         a = r.alloc.sort_values("hist_area")
         y = np.arange(len(a))
         fig, ax = plt.subplots(figsize=(COL, 3.3))
@@ -124,15 +103,6 @@ def main():
     ax[1].set_title(r"(b) Shadow price of land $\lambda^*(L)$")
     fig.tight_layout(w_pad=2)
     save(fig, "fig_parametric_land")
-
-    # Fig: band sweep
-    bb = oc.bound_band_sweep(coef, [0, 5, 10, 15, 20, 30, 40, 50, 75, 100])
-    fig, ax = plt.subplots(figsize=(COL, 1.9))
-    ax.plot(bb["band_pct"], bb["output_gain_pct"], marker="o", ms=3, color=BLUE, label="Opt. 1: output gain")
-    ax.plot(bb["band_pct"], bb["land_saving_pct"], marker="s", ms=3, color=ORANGE, label="Opt. 2: land saving")
-    ax.set_xlabel(r"Allowed change per crop, $\pm p$ (%)"); ax.set_ylabel("%")
-    ax.legend(frameon=False)
-    save(fig, "fig_band_sweep")
 
     # Fig: multi-district
     md = oc.multi_district(oc.filter_scope(data, STATE, None, SEASON, YEARS), crops, "mean", "historical",

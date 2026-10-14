@@ -39,7 +39,6 @@ Valid `page` values are `data`, `explore`, `crops`, `max`, `min`, `whatif`, `dis
 | `python generate_synthetic_data.py` | Regenerates the two test files in `sample_data/` (seeded, reproducible) |
 | `python run_case_study.py` | Reproduces every number and figure in the report, writing to `results/` |
 | `python ieee_paper/make_figures.py` | Regenerates the IEEE paper figures |
-| `streamlit run app.py` (or `run_streamlit.bat`) | The earlier Streamlit prototype, kept for reference |
 
 ## 2. Folder structure
 
@@ -49,16 +48,15 @@ Project/
 │   ├── server.py                  FastAPI backend: wraps or_core.py as a JSON API
 │   └── static/                    index.html · app.css · app.js (hand-built UI, Plotly.js served locally)
 ├── or_core.py                     All logic: cleaning, unit check, coefficients, LPs, sensitivity
-├── app.py                         Legacy Streamlit prototype
 ├── generate_synthetic_data.py     Builds sample_data/*.csv
 ├── run_case_study.py              Builds results/* used in REPORT.md
-├── requirements.txt · run_app.bat · run_streamlit.bat
+├── requirements.txt · run_app.bat
 ├── README.md · REPORT.md
-├── ieee_paper/                    IEEE LaTeX paper, figures, Overleaf zip
+├── ieee_paper/                    IEEE LaTeX paper (main.tex), 4 figures, Overleaf zip
 ├── sample_data/
 │   ├── synthetic_crop_data_demo.csv    "Demo Pradesh": 6 districts × 3 seasons × 2008-2019, with planted quirks
 │   └── synthetic_minimal_farm.csv      only Crop/Year/Area_ha/Production_q (tests column mapping)
-├── results/                       CSV tables + PNG figures + case_study_results.md
+├── results/                       CSV tables, the 4 report figures, case_study_results.md
 └── Indian Agriculture Crop Production and yield (GOV)/
     └── Indian_crop_production_yield_dataset.csv   (575,879 rows)
 ```

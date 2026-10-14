@@ -5,7 +5,7 @@ A short IEEE conference paper (`IEEEtran`). It follows the structure, formulatio
 | File | Purpose |
 |---|---|
 | `main.tex` | The paper: 5 figures, 4 tables and the deck's 7 references only |
-| `figures/*.pdf` | Vector figures used by `main.tex`. A `.png` copy of each is also included. |
+| `figures/*.pdf` | The 4 vector figures used by `main.tex` |
 | `make_figures.py` | Regenerates the figures from the dataset via `../or_core.py` |
 | `ieee_paper_overleaf.zip` | `main.tex` plus the 4 figure PDFs it uses, ready to upload to Overleaf |
 

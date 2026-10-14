@@ -55,19 +55,12 @@ def main():
     pool = lambda x: x[x["Crop"].isin(oc.unit_check(x).query("status=='Pool'")["Crop"])]  # noqa: E731
     sb_raw = oc.structural_break_check(pool(raw_d))
     sb = oc.structural_break_check(pool(data))
-    rpy_raw = raw_d.groupby("Crop_Year").size()
-    rpy = data.groupby("Crop_Year").size()
     fig, axs = plt.subplots(1, 2, figsize=(10, 3.4))
     axs[0].plot(sb_raw["Crop_Year"], sb_raw["Pooled_yield"], marker="o", color=ORANGE, lw=2, label="raw file")
     axs[0].set_title("Raw file: pooled yield ΣP/ΣA (mixed scales)"); axs[0].set_xlabel("Crop year")
     axs[1].plot(sb["Crop_Year"], sb["Pooled_yield"], marker="o", color=BLUE, lw=2, label="reconciled")
     axs[1].set_title("After reconciliation (t/ha)"); axs[1].set_xlabel("Crop year")
     fig.tight_layout(); fig.savefig(OUT / "fig1_stacked_source_fix.png"); plt.close(fig)
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.bar(rpy_raw.index - 0.2, rpy_raw.values, 0.4, color=ORANGE, label="raw file")
-    ax.bar(rpy.index + 0.2, rpy.values, 0.4, color=BLUE, label="after cleaning")
-    ax.set_title("Records per crop year"); ax.legend(frameon=False)
-    fig.tight_layout(); fig.savefig(OUT / "fig0_rows_per_year.png"); plt.close(fig)
     log.append("## Stacked-source reconciliation" + NL + NL + str(rep.stacked) + NL + NL +
                md(sb_raw[["Crop_Year", "Pooled_yield"]].merge(sb[["Crop_Year", "Pooled_yield", "YoY_change_%"]],
                                                             on="Crop_Year", suffixes=("_raw", "_clean")).round(3),
@@ -107,8 +100,7 @@ def main():
     log.append("\n## Optimization 2 — Min land\n\n" + md(pd.DataFrame([s2]), ",.6f") + "\n\n" +
                md(r2.alloc[["Crop", "y_c", "a_c", "m_c", "hist_area", "x_opt", "change_ha", "bound_status"]]))
 
-    for r, name, title in [(r1, "fig3_opt1_allocation.png", "Opt 1 (max output): hectares per crop"),
-                           (r2, "fig4_opt2_allocation.png", "Opt 2 (min land): hectares per crop")]:
+    for r, name, title in [(r1, "fig3_opt1_allocation.png", "Opt 1 (max output): hectares per crop")]:
         a = r.alloc.sort_values("hist_area")
         y = np.arange(len(a))
         fig, ax = plt.subplots(figsize=(8, 0.38 * len(a) + 1.2))
@@ -118,14 +110,6 @@ def main():
         ax.set_yticks(y, a["Crop"]); ax.set_xlabel("Thousand hectares"); ax.set_title(title)
         ax.legend(frameon=False, loc="lower right"); ax.grid(axis="y", alpha=0)
         fig.tight_layout(); fig.savefig(OUT / name); plt.close(fig)
-
-    # coefficient chart
-    c = coef.sort_values("y_c")
-    fig, ax = plt.subplots(figsize=(8, 0.35 * len(c) + 1.2))
-    ax.barh(c["Crop"], c["y_c"], xerr=c["yield_sd"], color=BLUE, error_kw=dict(ecolor=GRAY, lw=1))
-    ax.set_xlabel("Yield coefficient $y_c$ (tonnes / ha)")
-    ax.set_title(f"{STATE} {SEASON}: mean yield {YEARS[0]}–{YEARS[1]} ± std. dev.")
-    ax.grid(axis="y", alpha=0); fig.tight_layout(); fig.savefig(OUT / "fig2_coefficients.png"); plt.close(fig)
 
     # --- Sensitivity ------------------------------------------------------
     Ls = np.linspace(feas["min_land"], feas["max_land"] * 1.05, 80)
@@ -154,12 +138,6 @@ def main():
 
     bb = oc.bound_band_sweep(coef, [0, 5, 10, 15, 20, 30, 50, 75, 100])
     log.append("\n## Bound-band sweep\n\n" + md(bb))
-    fig, ax = plt.subplots(figsize=(7, 3.2))
-    ax.plot(bb["band_pct"], bb["output_gain_pct"], marker="o", color=BLUE, lw=2, label="Opt 1: output gain %")
-    ax.plot(bb["band_pct"], bb["land_saving_pct"], marker="s", color=ORANGE, lw=2, label="Opt 2: land saving %")
-    ax.set_xlabel("Each crop may move ±p % from its historical area"); ax.set_ylabel("%")
-    ax.set_title("How much flexibility the gain needs"); ax.legend(frameon=False)
-    fig.tight_layout(); fig.savefig(OUT / "fig6_band_sweep.png"); plt.close(fig)
 
     # --- Multi-district ---------------------------------------------------
     md_scope = oc.filter_scope(data, STATE, None, SEASON, YEARS)

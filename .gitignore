@@ -1,8 +1,5 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-.streamlit/
-# raw download; the extracted CSV in the folder of the same name is committed
-Indian Agriculture Crop Production and yield (GOV).zip
 # local extracted copy of the Overleaf zip (stale duplicate of ieee_paper/main.tex)
 ieee_paper/ieee_paper_overleaf/

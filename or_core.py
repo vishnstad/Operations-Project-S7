@@ -11,7 +11,7 @@ Implements the workflow from the Review-I deck (slide 14):
             -> Compare vs. historical allocation
             -> Sensitivity analysis + multi-district comparison (Review III)
 
-Every function is pure (DataFrame in, DataFrame/dict out) so the Streamlit app,
+Every function is pure (DataFrame in, DataFrame/dict out) so the web app,
 the case-study script and any notebook can share it.
 """
 from __future__ import annotations
