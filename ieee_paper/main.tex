@@ -148,7 +148,7 @@ Yield $=$ Production$/$Area.
         bales. They are excluded when crops are pooled into one output total.
   \item 212{,}373 records appear twice. The second copy has Production exactly $100\times$ the
         first (Fig.~\ref{fig:stacked}). The second copy is rescaled and the duplicate dropped.
-  \item After this fix, yields match Production in tonnes (rice 2.0--2.8\,t/ha).
+  \item After this fix, yields match Production in tonnes (rice 1.8--2.8\,t/ha).
   \item 1997 and 2020 are partial years, so the analysis window is 1998--2019.
 \end{itemize}
 
@@ -225,6 +225,14 @@ models.
 \label{fig:workflow}
 \end{figure}
 
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig_opt1_allocation}
+\caption{Optimization~1: historical versus optimal hectares per crop. Ticks mark the
+upper bounds $m_c$.}
+\label{fig:opt1}
+\end{figure}
+
 \begin{figure*}[!t]
 \centering
 \includegraphics[width=\textwidth]{fig_parametric_land}
@@ -264,14 +272,6 @@ The value of one extra hectare (the land dual) is 0.81\,t.
 \textbf{Optimization 2.} Historical output can be produced on 1.46 million ha less land.
 The dual of the target is 0.3806\,ha/t. This equals the reciprocal of the land dual of
 Opt.~1 at that land level, which confirms the primal/dual pairing.
-
-\begin{figure}[!t]
-\centering
-\includegraphics[width=\columnwidth]{fig_opt1_allocation}
-\caption{Optimization~1: historical versus optimal hectares per crop. Ticks mark the
-upper bounds $m_c$.}
-\label{fig:opt1}
-\end{figure}
 
 % =====================================================================
 \section{Sensitivity and Multi-District Comparison}

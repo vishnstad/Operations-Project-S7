@@ -40,7 +40,7 @@ The source is the *District-wise, Season-wise Crop Production Statistics* (MoA&F
 | Spelling variants (Paddy, Dry Ginger, …) | Merge | 3,565 renamed |
 | Count or bale units (Coconut in nuts; Cotton, Jute and Mesta in bales) | Exclude from pooling | — |
 
-**Result:** 358,739 clean rows. Production is in tonnes; yields now match official figures (rice 2.0–2.8 t/ha). 1997 and 2020 have only partial coverage, so the analysis window is **1998–2019**.
+**Result:** 358,739 clean rows. Production is in tonnes; yields now match official figures (rice 1.8–2.8 t/ha). 1997 and 2020 have only partial coverage, so the analysis window is **1998–2019**.
 
 ![Stacked-source fix](results/fig1_stacked_source_fix.png)
 
