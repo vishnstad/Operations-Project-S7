@@ -1,0 +1,12 @@
+pandas>=2.0
+numpy>=1.24
+scipy>=1.11
+PuLP>=2.7
+plotly>=5.18        # also provides the offline plotly.min.js used by the web UI
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+orjson>=3.9
+matplotlib>=3.7
+openpyxl>=3.1       # only needed to upload .xlsx files
+streamlit>=1.40     # only for the legacy prototype (app.py)
