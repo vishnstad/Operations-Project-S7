@@ -1,633 +1,451 @@
-/* =====================================================================
-   Crop-Area Allocation — simple frontend (vanilla JS + Plotly.js, offline)
-   All numbers come from the FastAPI backend (webapp/server.py -> or_core.py).
-   ===================================================================== */
-"use strict";
+// Solves both LPs for the chosen state and season and fills the pages. Pages switch by URL hash.
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const DEF = { land_pct: 100, target_pct: 100, bounds: "historical", band_pct: 20, pulse_share: 0, yield_method: "mean" };
+const S = { seasons: {}, r: null, india: {}, geo: null, model: 1, last: null, crop: null, cropData: {}, set: { ...DEF }, base: {} };
+const isDefault = (st) => Object.keys(DEF).every((k) => st[k] === DEF[k]);
+const indiaKey = (season) => `${season}|${JSON.stringify(S.set)}`;
+const INK = "#111", ACC = "#2f6f4e", ACC_L = "#9fc5ad", GREY = "#c9c9c9", MUTED = "#8a8a8a";
+const SCALE = [[0, "#eef5f0"], [0.5, "#7fae90"], [1, "#1d4d34"]];
+const TREND = ["#1d4d34", "#2f6f4e", "#5f9676", "#9fc5ad", "#8a8a8a"];
+const FONT = getComputedStyle(document.body).fontFamily;
+const PAGES = $$(".page").map((p) => p.id);
+const NAMES = Object.fromEntries($$(".menu a").map((a) => [a.getAttribute("href").slice(1), a.textContent.trim()]));
 
-const $ = (s, el = document) => el.querySelector(s);
-const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-// ------------------------------------------------------------------ state
-const S = {
-  sid: null, meta: null, prep: null, page: "home",
-  colmap: {}, cleaning: { drop_zero: true, merge_alias: true, drop_agg: true, reconcile: true },
-  scope: null,
-  settings: { yield_method: "mean", bound_mode: "historical", band_pct: 30, min_years: null, ratio_thr: 250 },
-  crops: null, L: null, target: 100, trendPick: null,
-  cache: {},
-};
-
-// ------------------------------------------------------------------ formatting
-const nf = (d) => new Intl.NumberFormat("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-function fmt(x, d = 0) {
-  if (x == null || Number.isNaN(x)) return "–";
-  const s = nf(d).format(x);
-  return /^-0(\.0+)?$/.test(s) ? s.slice(1) : s;
-}
-const pct = (x, d = 1) => (x == null ? "–" : (x > 0 ? "+" : "") + fmt(x, d) + "%");
+const fmt = (x, d = 0) => (x == null ? "–" : Number(x).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+const big = (x) => (x == null ? "–" : x >= 1e6 ? fmt(x / 1e6, 2) + " M" : x >= 1e3 ? fmt(x / 1e3, 1) + " k" : fmt(x));
+const pct = (x, d = 1) => (x == null ? "–" : (x > 0 ? "+" : x < 0 ? "−" : "") + fmt(Math.abs(x), d) + "%");
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const title = (s) => String(s).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const list = (a) => (a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]);
 
-function toast(msg, err = false) {
-  const t = document.createElement("div");
-  t.className = "toast" + (err ? " err" : "");
-  t.textContent = msg;
-  $("#toasts").appendChild(t);
-  setTimeout(() => t.remove(), err ? 6000 : 3000);
-}
+$$("[data-ic]").forEach((el) => el.insertAdjacentHTML("afterbegin", icon(el.dataset.ic, el.classList.contains("brand-ic") ? 20 : 17)));
 
-// ------------------------------------------------------------------ API
-async function api(path, body, form = false) {
-  const r = await fetch(path, form ? { method: "POST", body } :
-    { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+function status(msg, err = false) { const el = $("#status"); el.textContent = msg; el.className = "status" + (err ? " err" : ""); }
+
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } } : {});
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.detail || `Request failed (${r.status})`);
   return j;
 }
-const ctx = () => ({ sid: S.sid, scope: S.scope, settings: S.settings, crops: S.crops });
-async function cached(path, body) {
-  const key = path + JSON.stringify(body);
-  if (!S.cache[key]) S.cache[key] = api(path, body);
-  try { return await S.cache[key]; } catch (e) { delete S.cache[key]; throw e; }
-}
-function invalidate(keepL = false) { S.cache = {}; if (!keepL) S.L = null; }
 
-function downloadCSV(rows, name) {
-  if (!rows || !rows.length) return;
-  const cols = Object.keys(rows[0]);
-  const q = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v);
-  const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => q(r[c])).join(","))].join("\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-  a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+// KPI tiles; numeric values count up when they change
+function kpis(sel, items) {
+  $(sel).innerHTML = items.map(([k, v, s, good]) =>
+    `<div class="kpi"><div class="k">${k}</div><div class="v${good ? " up" : ""}" data-v="${typeof v === "object" ? v.n : ""}">${typeof v === "object" ? v.f(0) : v}</div>${s ? `<div class="s">${s}</div>` : ""}</div>`).join("");
+  items.forEach(([, v], i) => {
+    if (typeof v !== "object" || v.n == null) return;
+    const el = $(sel).children[i].querySelector(".v"), t0 = performance.now();
+    const step = (t) => { const p = Math.min(1, (t - t0) / 600), e = 1 - (1 - p) ** 3; el.textContent = v.f(v.n * e); if (p < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  });
+}
+const N = (n, f) => ({ n, f });
+
+function table(cols, rows) {
+  return `<table><thead><tr>${cols.map((c) => `<th class="${c.r ? "r" : ""}">${c.label}</th>`).join("")}</tr></thead><tbody>${
+    rows.map((row) => `<tr>${cols.map((c) => `<td class="${c.r ? "r" : ""}">${c.f ? c.f(row[c.k], row) : esc(row[c.k] ?? "–")}</td>`).join("")}</tr>`).join("")
+  }</tbody></table>`;
 }
 
-// ------------------------------------------------------------------ charts
-const C = () => ({ hist: cssv("--accent"), opt: cssv("--accent-2"), neutral: cssv("--neutral-mark"),
-  text: cssv("--text-2"), grid: cssv("--border") });
-function plot(sel, data, layout = {}, height = 320) {
-  const el = $(sel); if (!el) return;
-  const c = C();
-  const base = {
-    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-    font: { family: cssv("--font"), size: 12.5, color: c.text },
-    margin: { l: 60, r: 16, t: 10, b: 44 }, height, hovermode: "closest",
-    legend: { orientation: "h", y: 1.02, yanchor: "bottom", x: 0 },
-    xaxis: { gridcolor: c.grid, zeroline: false, automargin: true },
-    yaxis: { gridcolor: c.grid, zeroline: false, automargin: true },
-  };
-  Plotly.react(el, data, { ...base, ...layout, xaxis: { ...base.xaxis, ...(layout.xaxis || {}) }, yaxis: { ...base.yaxis, ...(layout.yaxis || {}) } },
-    { displayModeBar: false, responsive: true });
+function plot(sel, data, layout = {}, height = 340) {
+  const { xaxis = {}, yaxis = {}, ...rest } = layout;
+  for (const ax of [xaxis, yaxis]) if (typeof ax.title === "string") ax.title = { text: ax.title, font: { size: 12, color: MUTED } };
+  return Plotly.react($(sel), data, {
+    height, margin: { l: 60, r: 16, t: 8, b: 48 }, font: { family: FONT, size: 12, color: "#2b2b2b" },
+    paper_bgcolor: "#fff", plot_bgcolor: "#fff", legend: { orientation: "h", y: 1.12, x: 0 }, bargap: 0.25,
+    xaxis: { fixedrange: true, gridcolor: "#eee", zeroline: false, automargin: true, ...xaxis },
+    yaxis: { fixedrange: true, gridcolor: "#eee", zeroline: false, automargin: true, ...yaxis },
+    transition: { duration: 450, easing: "cubic-in-out" },
+    ...rest,
+  }, { displayModeBar: false, responsive: true });
 }
-const hbar = (rows, yk, xk, color, hover) => ({ type: "bar", orientation: "h", y: rows.map((r) => r[yk]), x: rows.map((r) => r[xk]),
-  marker: { color }, hovertemplate: hover });
-const vline = (x) => ({ type: "line", xref: "x", yref: "paper", x0: x, x1: x, y0: 0, y1: 1, line: { color: C().neutral, dash: "dot", width: 1.5 } });
 
-// ------------------------------------------------------------------ tables (click a header to sort)
-function table(sel, cols, rows, { limit = 0, search = false } = {}) {
-  const el = $(sel); if (!el) return;
-  const st = { k: null, asc: false, all: !limit, q: "" };
-  function draw() {
-    let r = rows.slice();
-    if (st.q) { const q = st.q.toLowerCase(); r = r.filter((x) => cols.some((c) => String(x[c.k] ?? "").toLowerCase().includes(q))); }
-    if (st.k) r.sort((a, b) => { const x = a[st.k], y = b[st.k]; if (x == null) return 1; if (y == null) return -1;
-      return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * (st.asc ? 1 : -1); });
-    const shown = st.all ? r : r.slice(0, limit);
-    const more = limit && r.length > limit ? ` · <a href="#" class="tmore">${st.all ? "show fewer" : "show all " + r.length}</a>` : "";
-    el.innerHTML = (search || more ? `<div class="tools">${search ? `<input type="search" class="tq" placeholder="Search" value="${esc(st.q)}">` : "<span></span>"}<span class="muted">${fmt(r.length)} rows${more}</span></div>` : "") +
-      `<div class="twrap"><table><thead><tr>${cols.map((c) => `<th data-k="${c.k}" class="${c.r ? "r" : ""}">${c.label}</th>`).join("")}</tr></thead><tbody>
-      ${shown.map((x) => `<tr>${cols.map((c) => `<td class="${c.r ? "r" : ""}">${c.f ? c.f(x[c.k], x) : esc(x[c.k])}</td>`).join("")}</tr>`).join("")
-        || `<tr><td colspan="${cols.length}" class="muted">No rows</td></tr>`}</tbody></table></div>`;
-    $$("th", el).forEach((th) => th.onclick = () => { st.asc = st.k === th.dataset.k ? !st.asc : false; st.k = th.dataset.k; draw(); });
-    const m = $(".tmore", el); if (m) m.onclick = (e) => { e.preventDefault(); st.all = !st.all; draw(); };
-    const q = $(".tq", el); if (q) q.oninput = () => { st.q = q.value; draw(); const n = $(".tq", el); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
-  }
-  draw();
+// choropleth: one base layer (no data), the values, and an outline for the highlighted area
+function map(sel, geo, ids, z, hover, { pick = null, height = 460, onClick = null, suffix = "%", label = "gain" } = {}) {
+  const all = geo.features.map((f) => f.id);
+  const traces = [
+    { type: "choropleth", geojson: geo, locations: all, z: all.map(() => 0), colorscale: [[0, "#f1f1f0"], [1, "#f1f1f0"]],
+      showscale: false, marker: { line: { color: "#fff", width: 0.6 } }, hoverinfo: "skip" },
+    { type: "choropleth", geojson: geo, locations: ids, z, colorscale: SCALE, zmin: 0,
+      marker: { line: { color: "#fff", width: 0.6 } }, text: hover, hovertemplate: "%{text}<extra></extra>",
+      colorbar: { thickness: 10, len: 0.6, ticksuffix: suffix, outlinewidth: 0, title: { text: label, side: "top", font: { size: 11 } } } },
+  ];
+  if (pick) traces.push({ type: "choropleth", geojson: geo, locations: [pick], z: [1], showscale: false, hoverinfo: "skip",
+    colorscale: [[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]], marker: { line: { color: INK, width: 2.4 } } });
+  Plotly.react($(sel), traces, {
+    height, margin: { l: 0, r: 0, t: 0, b: 0 }, font: { family: FONT, size: 12 }, paper_bgcolor: "#fff",
+    geo: { fitbounds: "locations", visible: false, projection: { type: "mercator" }, bgcolor: "#fff" }, dragmode: false,
+  }, { displayModeBar: false, responsive: true, scrollZoom: false });
+  if (onClick) { const el = $(sel); el.removeAllListeners?.("plotly_click"); el.on("plotly_click", (e) => onClick(e.points[0].location)); }
 }
-const F = {
-  int: (v) => fmt(v, 0), n3: (v) => fmt(v, 3), n4: (v) => fmt(v, 4), title: (v) => esc(title(v)),
-  pct: (v) => (v == null ? "–" : `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${pct(v)}</span>`),
-  signed: (v) => (v == null ? "–" : `<span class="${v > 0.5 ? "pos" : v < -0.5 ? "neg" : ""}">${v > 0 ? "+" : ""}${fmt(v, 0)}</span>`),
-  status: (v) => !v ? "–" : v.startsWith("at max") ? "at maximum" : v.startsWith("at min") ? "at minimum" : v.startsWith("basic") ? "<b>marginal crop</b>" : esc(v),
-};
-
-// ------------------------------------------------------------------ page helpers
-const num = (label, value, main = false) => `<div class="num ${main ? "main" : ""}"><div class="l">${label}</div><div class="v">${value}</div></div>`;
-const note = (html, kind = "") => `<div class="note ${kind}">${html}</div>`;
-const loading = (msg = "Calculating…") => `<div class="loading">${msg}</div>`;
-const ORDER = ["home", "explore", "crops", "max", "min", "whatif", "districts", "method"];
-const LABEL = { explore: "Explore", crops: "Crops", max: "Maximise output", min: "Minimise land", whatif: "Sensitivity", districts: "Districts", method: "Model" };
-const next = (page) => { const n = ORDER[ORDER.indexOf(page) + 1]; return n ? `<div class="next"><button class="btn primary" data-go="${n}">Next: ${LABEL[n]} →</button></div>` : ""; };
-const scopeText = () => S.scope ? `${S.scope.state} · ${S.scope.season} · ${S.scope.districts.length ? title(S.scope.districts[0]) : "all districts"} · ${S.scope.years[0]}–${S.scope.years[1]}` : "";
 
 // ------------------------------------------------------------------ navigation
-const view = () => $("#view");
-const PAGES = {};
-function go(page) {
-  if (!PAGES[page]) return;
-  if (!S.prep && !["home", "method"].includes(page)) page = "home";
-  S.page = page;
-  $$("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.page === page));
-  $("#scope").classList.toggle("hidden", !S.prep || ["home", "method"].includes(page));
-  window.scrollTo({ top: 0 });
-  PAGES[page]();
-}
-const rerender = () => PAGES[S.page]();
-document.addEventListener("click", (e) => {
-  const g = e.target.closest("[data-go]");
-  if (g) { e.preventDefault(); go(g.dataset.go); }
-  const t = e.target.closest("#tabs button");
-  if (t && !t.disabled) go(t.dataset.page);
-});
-async function guarded(fn) {
-  try { await fn(); } catch (e) {
-    view().innerHTML = note(`<b>Could not compute this page.</b> ${esc(e.message)}`, "bad") + `<button class="btn" id="retry">Try again</button>`;
-    $("#retry").onclick = () => { invalidate(true); rerender(); };
+function show() {
+  const page = PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+  $$(".page").forEach((p) => p.classList.toggle("on", p.id === page));
+  $$(".menu a").forEach((a) => a.classList.toggle("on", a.getAttribute("href") === "#" + page));
+  const i = PAGES.indexOf(page);
+  for (const [id, j] of [["prev", i - 1], ["next", i + 1]]) {
+    const b = $("#" + id), p = PAGES[j];
+    b.classList.toggle("hidden", !p);
+    if (p) { b.href = "#" + p; b.querySelector(".t").textContent = NAMES[p]; }
   }
+  window.scrollTo(0, 0);
+  draw(page);
 }
+window.addEventListener("hashchange", show);
+const current = () => PAGES.find((p) => $("#" + p).classList.contains("on"));
 
-// ================================================================== 1. Data
-PAGES.home = function () {
-  if (!S.meta) return renderStart();
-  if (!S.prep) return renderMapping();
-  renderData();
-};
+// ------------------------------------------------------------------ selection
+function fillSelects(state, season) {
+  const st = $("#selState"), se = $("#selSeason");
+  st.innerHTML = Object.keys(S.seasons).map((s) => `<option ${s === state ? "selected" : ""}>${esc(s)}</option>`).join("");
+  se.innerHTML = S.seasons[state].map((s) => `<option ${s === season ? "selected" : ""}>${esc(s)}</option>`).join("");
+  st.disabled = se.disabled = false;
+}
+function selectState(state) {
+  if (!S.seasons[state]) return;
+  const se = $("#selSeason").value;
+  fillSelects(state, S.seasons[state].includes(se) ? se : S.seasons[state][0]);
+  run();
+}
+$("#selState").onchange = () => selectState($("#selState").value);
+$("#selSeason").onchange = () => run();
+$$("[data-model]").forEach((b) => b.onclick = () => {
+  S.model = +b.dataset.model;
+  $$("[data-model]").forEach((x) => x.classList.toggle("on", x === b));
+  renderModel(); draw("results");
+});
 
-function renderStart() {
-  view().innerHTML = `
-    <h1>Load crop production data</h1>
-    <p class="muted">The app cleans the data, checks production units, builds the two linear programmes from the
-      average yields, and compares the optimal crop allocation with the historical one.</p>
-    <div class="choices">
-      <label class="choice" id="drop"><input type="file" id="fileIn" accept=".csv,.xlsx,.xls,.txt" hidden>
-        <b>Upload a file</b><span>CSV or Excel. Click here or drop a file. Needs Crop, Area and Production columns.</span></label>
-      <button class="choice" data-load="demo"><b>Demo dataset</b><span>Synthetic test data, 1,664 rows. Loads instantly.</span></button>
-      <button class="choice" data-load="gov"><b>Government of India dataset</b><span>575,879 rows, used in the report. Takes about 10 s.</span></button>
-    </div>
-    <p class="small muted">Sample files to try uploading:
-      <a href="/api/sample/demo">synthetic_crop_data_demo.csv</a> (full columns) ·
-      <a href="/api/sample/mini">synthetic_minimal_farm.csv</a> (only Crop, Year, Area, Production).</p>`;
-  const drop = $("#drop"), fi = $("#fileIn");
-  fi.onchange = () => fi.files[0] && uploadFile(fi.files[0]);
-  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
-  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
-  drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && uploadFile(e.dataTransfer.files[0]));
-  $$("[data-load]").forEach((b) => b.onclick = () => loadBuiltin(b.dataset.load));
-}
-
-async function loadBuiltin(name) {
-  view().innerHTML = loading(name === "gov" ? "Reading 575,879 records (about 10 seconds)…" : "Loading…");
-  try { setMeta(await api("/api/load", { name })); } catch (e) { toast(e.message, true); resetAll(); }
-}
-async function uploadFile(file) {
-  view().innerHTML = loading(`Reading ${esc(file.name)}…`);
-  const fd = new FormData(); fd.append("file", file);
-  try { setMeta(await api("/api/upload", fd, true)); } catch (e) { toast(e.message, true); resetAll(); }
-}
-function setMeta(m) {
-  Object.assign(S, { meta: m, sid: m.sid, prep: null, colmap: { ...m.guess }, crops: null });
-  invalidate(); lockTabs(true);
-  $("#dataName").textContent = `${m.name} · ${fmt(m.rows)} rows`;
-  $("#newDataBtn").classList.remove("hidden");
-  if (m.required.every((k) => S.colmap[k])) prepare(); else renderMapping();
-}
-function resetAll() {
-  Object.assign(S, { sid: null, meta: null, prep: null, scope: null, crops: null, L: null, cache: {} });
-  lockTabs(true); $("#dataName").textContent = ""; $("#newDataBtn").classList.add("hidden"); go("home");
-}
-function lockTabs(lock) { $$("#tabs button").forEach((b) => { if (!["home", "method"].includes(b.dataset.page)) b.disabled = lock; }); }
-
-const CLEAN_RULES = [["drop_zero", "Drop rows with zero production"], ["merge_alias", "Merge crop-name spellings (e.g. Paddy → Rice)"],
-  ["drop_agg", "Drop aggregate rows (e.g. Total foodgrain)"], ["reconcile", "Fix duplicate copies stored ×100"]];
-const cleaningChecks = () => `<div class="checks">${CLEAN_RULES.map(([k, t]) =>
-  `<label><input type="checkbox" data-clean="${k}" ${S.cleaning[k] ? "checked" : ""}> ${t}</label>`).join("")}</div>`;
-
-function renderMapping() {
-  const m = S.meta;
-  const desc = { State_Name: "State", District_Name: "District", Crop_Year: "Year", Season: "Season",
-    Crop: "Crop *", Area: "Area (ha) *", Production: "Production *", Yield: "Yield" };
-  view().innerHTML = `
-    <h1>Match your columns</h1>
-    <p class="muted">${esc(m.name)} · ${fmt(m.rows)} rows. Columns marked * are required.</p>
-    <div class="map">${m.canonical.map((k) => {
-      const req = m.required.includes(k), val = S.colmap[k] || "";
-      return `<label class="${req && !val ? "missing" : ""}">${desc[k]}<select data-map="${k}"><option value="">— none —</option>${m.columns.map((c) =>
-        `<option ${c === val ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`; }).join("")}</div>
-    <h2>Cleaning</h2>${cleaningChecks()}
-    <p style="margin-top:14px"><button class="btn primary" id="goPrep">Analyse data</button></p>
-    <h2>File preview</h2><div id="pv"></div>`;
-  $$("[data-map]").forEach((s) => s.onchange = () => { S.colmap[s.dataset.map] = s.value; renderMapping(); });
-  $$("[data-clean]").forEach((c) => c.onchange = () => { S.cleaning[c.dataset.clean] = c.checked; });
-  table("#pv", m.columns.map((c) => ({ k: c, label: esc(c) })), m.preview, { limit: 8 });
-  $("#goPrep").onclick = prepare;
-}
-
-async function prepare() {
-  const missing = S.meta.required.filter((k) => !S.colmap[k]);
-  if (missing.length) { toast("Please choose a column for: " + missing.join(", "), true); return renderMapping(); }
-  view().innerHTML = loading("Cleaning and checking the data…");
+async function run() {
+  const state = $("#selState").value, season = $("#selSeason").value, settings = { ...S.set };
+  status(`Solving ${state} · ${season}…`);
+  document.body.classList.add("loading");
   try {
-    const p = await api("/api/prepare", { sid: S.sid, colmap: S.colmap, cleaning: S.cleaning });
-    S.prep = p; S.crops = null; invalidate();
-    S.scope = { state: p.default.state, season: p.default.season, districts: [], years: p.default.years };
-    buildScope(); lockTabs(false);
-    const target = S.autoPage && PAGES[S.autoPage] ? S.autoPage : "home";
-    S.autoPage = null;
-    go(target);
-  } catch (e) { toast(e.message, true); renderMapping(); }
+    const bkey = `${state}|${season}`, custom = !isDefault(settings);
+    const [r, ind, base] = await Promise.all([
+      api("/api/run", { state, season, settings }),
+      S.india[indiaKey(season)] ? Promise.resolve(S.india[indiaKey(season)]) : api("/api/india", { season, settings }),
+      !custom || S.base[bkey] ? Promise.resolve(S.base[bkey]) : api("/api/run", { state, season }),
+    ]);
+    S.r = r; S.india[indiaKey(season)] = ind; S.last = [state, season, settings];
+    S.base[bkey] = custom ? base : r;
+    render();
+    status(`${r.coef.length} crops · ${r.years[0]}–${r.years[1]}`);
+    draw(current());
+  } catch (e) {
+    status(e.message, true);
+    if (S.last) { fillSelects(S.last[0], S.last[1]); S.set = { ...S.last[2] }; }   // keep inputs consistent with what is shown
+    if (S.r) renderInputs(e.message);
+  } finally { document.body.classList.remove("loading"); }
 }
 
-function renderData() {
-  const p = S.prep, k = p.kpis;
-  view().innerHTML = `
-    <h1>Data summary</h1>
-    <p class="muted">${esc(S.meta.name)}. Every row is cleaned before any number is computed.</p>
-    <div class="nums">
-      ${num("Usable rows", fmt(k.rows_clean), true)}
-      ${num("Rows removed", fmt(k.rows_raw - k.rows_clean))}
-      ${num("States / districts", `${fmt(k.states)} / ${fmt(k.districts)}`)}
-      ${num("Crops", fmt(k.crops))}
-      ${num("Years", `${k.year_min}–${k.year_max}`)}
-    </div>
-    ${p.stacked ? note(`<b>Duplicate copy found and fixed.</b> ${fmt(p.stacked.pairs)} records appear twice, the second copy with
-      production ×${fmt(p.stacked.factor)}. The copies were rescaled and the duplicates dropped, so all production is in one unit.`, "warn") : ""}
-    <h2>Cleaning steps</h2><div id="tbClean"></div>
-    <h2>Records per year</h2><div id="chYear" class="chart"></div>
-    <h2>Cleaned data (first rows)</h2><div id="tbPrev"></div>
-    ${next("home")}`;
-  table("#tbClean", [{ k: "step", label: "Step" }, { k: "removed", label: "Rows removed", r: 1, f: F.int }, { k: "why", label: "Reason" }], p.cleaning);
-  plot("#chYear", [{ type: "bar", x: p.rows_per_year.x, y: p.rows_per_year.y, marker: { color: C().hist },
-    hovertemplate: "%{x}: %{y:,} rows<extra></extra>" }], { yaxis: { title: "rows" } }, 260);
-  table("#tbPrev", [{ k: "State_Name", label: "State" }, { k: "District_Name", label: "District", f: F.title }, { k: "Crop_Year", label: "Year" },
-    { k: "Season", label: "Season" }, { k: "Crop", label: "Crop" }, { k: "Area", label: "Area (ha)", r: 1, f: F.int },
-    { k: "Production", label: "Production", r: 1, f: (v) => fmt(v, 1) }, { k: "Yield", label: "Yield", r: 1, f: F.n3 }], p.preview, { limit: 10 });
+// ------------------------------------------------------------------ model inputs
+const BOUNDS = { historical: "Historical min to max", band: "Around average" };
+const YIELD = { mean: "Mean", median: "Median", weighted: "Area-weighted" };
+function renderInputs(err = "") {
+  const st = S.set, lim = S.r.limits, o1 = S.r.opt1;
+  $("#inLand").value = st.land_pct; $("#inTarget").value = st.target_pct; $("#inBand").value = st.band_pct; $("#inPulse").value = st.pulse_share;
+  $("#vLand").textContent = `${st.land_pct}% · ${big(o1.L_hist * st.land_pct / 100)} ha`;
+  $("#vTarget").textContent = `${st.target_pct}% · ${big(S.r.opt2.D_hist * st.target_pct / 100)} t`;
+  $("#vBounds").textContent = st.bounds === "band" ? `±${st.band_pct}%` : "min–max";
+  $("#vPulse").textContent = st.pulse_share ? `≥ ${st.pulse_share}%` : "off";
+  $("#vYield").textContent = YIELD[st.yield_method];
+  $("#bandRow").classList.toggle("hidden", st.bounds !== "band");
+  $$("[data-bounds]").forEach((b) => b.classList.toggle("on", b.dataset.bounds === st.bounds));
+  $$("[data-yield]").forEach((b) => b.classList.toggle("on", b.dataset.yield === st.yield_method));
+  $("#hLand").textContent = `Needs at least ${fmt(lim.land_min_pct)}%: below that the crops' lower limits do not fit.`;
+  $("#hTarget").textContent = `Reachable up to ${fmt(lim.target_max_pct)}%: every crop at its upper limit.`;
+  $("#hBounds").textContent = st.bounds === "band" ? `Each crop stays within ±${st.band_pct}% of its average area.` : "Each crop between its smallest and largest yearly area.";
+  $("#inPulse").disabled = !lim.has_pulses;
+  $("#hPulse").textContent = lim.has_pulses ? `Historically ${fmt(lim.pulse_hist_pct, 1)}% · at most about ${fmt(lim.pulse_max_pct)}% possible.` : "No pulses in this state's LP.";
+  $("#hYield").textContent = { mean: "Average of yearly yields (as in the report).", median: "Middle year; ignores unusual years.", weighted: "Total production ÷ total area." }[st.yield_method];
+  const msg = $("#hLand").closest(".inputs");
+  msg.querySelectorAll(".in-hint").forEach((h) => h.classList.remove("warn"));
+  if (err) { const h = /Model 1/.test(err) && !/pulses/.test(err) ? "#hLand" : /Model 2/.test(err) && !/pulses/.test(err) ? "#hTarget" : "#hPulse";
+    $(h).textContent = err; $(h).classList.add("warn"); }
+  $("#activeList").innerHTML = [
+    `Model 1 land ≤ ${st.land_pct}% of history`, `Model 2 output ≥ ${st.target_pct}% of history`,
+    st.bounds === "band" ? `each crop within ±${st.band_pct}% of its average area` : "each crop within its historical min–max area",
+    st.pulse_share && lim.has_pulses ? `pulses ≥ ${st.pulse_share}% of land` : "no pulse floor",
+    `${YIELD[st.yield_method].toLowerCase()} yields`,
+  ].map((x) => `<li>${x}</li>`).join("");
+  $("#customBadge").classList.toggle("hidden", isDefault(st));
+}
+function setInput(k, v) { S.set[k] = v; renderInputs(); run(); }
+for (const [id, k] of [["#inLand", "land_pct"], ["#inTarget", "target_pct"], ["#inBand", "band_pct"], ["#inPulse", "pulse_share"]]) {
+  $(id).oninput = () => { S.set[k] = +$(id).value; renderInputs(); };
+  $(id).onchange = () => setInput(k, +$(id).value);
+}
+$$("[data-bounds]").forEach((b) => b.onclick = () => setInput("bounds", b.dataset.bounds));
+$$("[data-yield]").forEach((b) => b.onclick = () => setInput("yield_method", b.dataset.yield));
+$("#btnReset").onclick = () => { S.set = { ...DEF }; renderInputs(); run(); };
+
+function renderEffect() {
+  const r = S.r, b = S.base[`${r.state}|${r.season}`] || r, custom = !isDefault(S.set);
+  const pulseShare = (res) => { const a = res.opt1.alloc, tot = a.reduce((t, d) => t + d.x_opt, 0);
+    return 100 * a.filter((d) => res.pulse_crops.includes(d.Crop)).reduce((t, d) => t + d.x_opt, 0) / tot; };
+  const was = (v) => (custom ? `default ${v}` : "default inputs");
+  kpis("#kpiEffect", [
+    ["Model 1 · output vs history", N(r.opt1.gain_pct, (x) => pct(x)), was(pct(b.opt1.gain_pct)), r.opt1.gain_pct > 0],
+    ["Model 2 · land vs history", N(-r.opt2.saving_pct, (x) => pct(x)), was(pct(-b.opt2.saving_pct)), r.opt2.saving_pct > 0],
+    ["Value of one more hectare", N(r.opt1.lam, (x) => fmt(x, 2) + " t"), was(fmt(b.opt1.lam, 2) + " t")],
+    ["Pulses in Model 1 plan", r.limits.has_pulses ? N(pulseShare(r), (x) => fmt(x, 1) + "%") : "–", r.limits.has_pulses ? was(fmt(pulseShare(b), 1) + "%") : "no pulses"],
+  ]);
+  $("#effectNote").textContent = custom ? "Bars compare the Model 1 plan under your inputs with the plan under the default inputs."
+    : "Change an input above to compare. With the defaults, the bars compare history with the Model 1 plan.";
 }
 
-// ------------------------------------------------------------------ scope bar
-function buildScope() {
-  const p = S.prep, sc = S.scope;
-  const st = $("#selState"), se = $("#selSeason"), di = $("#selDistrict"), y0 = $("#selY0"), y1 = $("#selY1");
-  const opts = (arr, cur, lab = (x) => x) => arr.map((x) => `<option value="${esc(x)}" ${x === cur ? "selected" : ""}>${esc(lab(x))}</option>`).join("");
-  const fill = () => {
-    const h = p.hierarchy[sc.state];
-    if (!h.seasons.includes(sc.season)) sc.season = h.seasons.includes("Kharif") ? "Kharif" : h.seasons[0];
-    st.innerHTML = opts(p.states, sc.state);
-    se.innerHTML = opts(h.seasons, sc.season);
-    di.innerHTML = `<option value="">All districts</option>` + opts(h.districts, sc.districts[0], title);
-    const yrs = []; for (let y = p.kpis.year_min; y <= p.kpis.year_max; y++) yrs.push(y);
-    y0.innerHTML = opts(yrs, sc.years[0]); y1.innerHTML = opts(yrs, sc.years[1]);
-  };
-  fill();
-  const changed = () => { fill(); S.crops = null; S.trendPick = null; invalidate(); rerender(); };
-  st.onchange = () => { sc.state = st.value; sc.districts = []; changed(); };
-  se.onchange = () => { sc.season = se.value; changed(); };
-  di.onchange = () => { sc.districts = di.value ? [di.value] : []; changed(); };
-  y0.onchange = () => { sc.years = [Math.min(+y0.value, sc.years[1]), sc.years[1]]; changed(); };
-  y1.onchange = () => { sc.years = [sc.years[0], Math.max(+y1.value, sc.years[0])]; changed(); };
+// ------------------------------------------------------------------ text and tables
+function render() {
+  const r = S.r, o1 = r.opt1, o2 = r.opt2, p = r.profile;
+  $$("[data-scope]").forEach((el) => el.textContent = `${r.state} · ${r.season} · ${r.years[0]}–${r.years[1]}`);
+  $("#mapSeason").textContent = `${r.season} season`;
+
+  const gap = o1.scipy_Z != null ? Math.abs(o1.Z - o1.scipy_Z) / o1.Z : null;
+  $("#agree").innerHTML = gap != null ? `This run: both solvers agree to ${gap < 1e-9 ? "&lt; 10⁻⁹" : gap.toExponential(1)} (relative).` : "";
+
+  kpis("#kpiOverview", [
+    ["Output on the same land", N(o1.gain_pct, (x) => pct(x)), "Model 1", true],
+    ["Land for the same output", N(-o2.saving_pct, (x) => pct(x)), "Model 2", true],
+    ["Crops in the LP", N(r.coef.length, (x) => fmt(x)), `${r.excluded.length} excluded for units`],
+    ["Value of one more hectare", N(o1.lam, (x) => fmt(x, 2) + " t"), "shadow price λ*"],
+  ]);
+  kpis("#kpiState", [
+    ["Records", N(p.records, (x) => fmt(x)), `${r.years[0]}–${r.years[1]}`],
+    ["Districts modelled", N(p.districts, (x) => fmt(x)), "solved separately"],
+    ["Crops grown", N(p.crops, (x) => fmt(x)), `${r.coef.length} enter the LP`],
+    ["LP crop area per year", N(p.area, big), `ha · ${big(p.production)} t output`],
+  ]);
+
+  const c = S.meta.cleaning;
+  $("#cleaning").innerHTML = `<p><b>${fmt(c.rows_in)}</b> rows → <b>${fmt(c.rows_out)}</b> after cleaning</p>` +
+    table([{ k: "step", label: "Removed (whole dataset)" }, { k: "removed", label: "Rows", r: 1, f: (v) => "−" + fmt(v) }], c.steps);
+  $("#excluded").innerHTML = r.excluded.length
+    ? "<div style='height:14px'></div>" + table([{ k: "Crop", label: `Excluded here (${r.state})` }, { k: "reason", label: "Reason" }], r.excluded) : "";
+
+  renderModel();
+  interpret();
+  renderChips();
+  renderInputs();
+  renderEffect();
 }
 
-// ================================================================== 2. Explore
-PAGES.explore = () => guarded(async () => {
-  view().innerHTML = loading();
-  const d = await cached("/api/explore", ctx());
-  if (S.page !== "explore") return;
-  if (!S.trendPick) S.trendPick = d.trend_default;
-  view().innerHTML = `
-    <h1>Explore the data</h1>
-    <p class="muted">${esc(scopeText())}. Only crops measured by weight are included.</p>
-    <ul class="plain">${d.insights.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
-    <div class="two">
-      <div><h2>Top crops by area</h2><div id="chTop" class="chart"></div></div>
-      <div><h2>Yield trend</h2><p class="small muted">Choose up to 3 crops: <span id="picks"></span></p><div id="chTrend" class="chart"></div></div>
-    </div>
-    <h2>Districts: area vs production</h2><div id="chDist" class="chart"></div>
-    <h2>Best-yielding crop per district and season</h2><div id="tbBest"></div>
-    ${next("explore")}`;
-  const c = C();
-  const t = [...d.top_crops].sort((a, b) => a.Area - b.Area);
-  plot("#chTop", [hbar(t, "Crop", "Area", c.hist, "%{y}: %{x:,.0f} ha<extra></extra>")],
-    { margin: { l: 10, r: 16, t: 6, b: 40 }, xaxis: { title: "hectares (total)" } }, Math.max(300, 22 * t.length + 60));
-  const pal = [c.hist, c.opt, c.neutral];
-  const drawTrend = () => {
-    $("#picks").innerHTML = Object.keys(d.trend).map((k) =>
-      `<label style="margin-right:10px;white-space:nowrap"><input type="checkbox" data-tc="${esc(k)}" ${S.trendPick.includes(k) ? "checked" : ""}> ${esc(k)}</label>`).join("");
-    $$("[data-tc]").forEach((b) => b.onchange = () => {
-      const k = b.dataset.tc;
-      if (!b.checked) S.trendPick = S.trendPick.filter((x) => x !== k);
-      else if (S.trendPick.length >= 3) { toast("Up to 3 crops at a time."); b.checked = false; return; }
-      else S.trendPick = [...S.trendPick, k];
-      drawTrend();
-    });
-    plot("#chTrend", S.trendPick.filter((k) => d.trend[k]).map((k, i) => ({ type: "scatter", mode: "lines+markers", name: k,
-      x: d.trend[k].x, y: d.trend[k].y, line: { color: pal[i], width: 2 }, marker: { size: 6 },
-      hovertemplate: `${k} %{x}: %{y:.3f}/ha<extra></extra>` })), { yaxis: { title: "yield per ha" } }, 300);
-  };
-  drawTrend();
-  plot("#chDist", [{ type: "scatter", mode: "markers", x: d.districts.map((r) => r.Area), y: d.districts.map((r) => r.Production),
-    text: d.districts.map((r) => title(r.District_Name)), marker: { size: 10, color: c.hist, opacity: 0.8 },
-    hovertemplate: "<b>%{text}</b><br>Area %{x:,.0f} ha<br>Production %{y:,.0f}<extra></extra>" }],
-  { xaxis: { type: "log", title: "area (ha, log scale)" }, yaxis: { type: "log", title: "production (log scale)" } }, 320);
-  const seasons = [...new Set(d.best.map((r) => r.Season))].sort();
-  const byD = {}; d.best.forEach((r) => { (byD[r.District] ||= { District: r.District })[r.Season] = `${r.Crop} (${fmt(r.Yield, 2)})`; });
-  table("#tbBest", [{ k: "District", label: "District", f: F.title }, ...seasons.map((s) => ({ k: s, label: esc(s), f: (v) => esc(v || "–") }))],
-    Object.values(byD), { limit: 12, search: true });
-});
-
-// ================================================================== 3. Crops
-PAGES.crops = () => guarded(async () => {
-  view().innerHTML = loading();
-  const d = await cached("/api/crops", ctx());
-  if (S.page !== "crops") return;
-  const sel = new Set(d.selected), inCoef = new Set(d.coef.map((r) => r.Crop));
-  const coefBy = Object.fromEntries(d.coef.map((r) => [r.Crop, r]));
-  const st = S.settings;
-  view().innerHTML = `
-    <h1>Crops in the model</h1>
-    <p class="muted">${esc(scopeText())}. Only crops measured in the same unit (weight) can be added together, so crops counted in nuts
-      or bales are left out. Each crop also needs data in at least ${d.min_years} of the selected years.</p>
-    ${d.baseline ? `<div class="nums">
-      ${num("Crops in the LP", fmt(d.coef.length), true)}
-      ${num("Historical land L (ha)", fmt(d.baseline.L))}
-      ${num("Historical output D", fmt(d.baseline.D))}
-    </div>` : note("Fewer than 2 crops have enough data for an LP. Tick more crops or widen the years.", "bad")}
-    <p class="row"><button class="btn" id="cRec">Recommended</button><button class="btn" id="cAll">Select all</button><button class="btn" id="cNone">Clear</button></p>
-    <div class="twrap croptbl"><table><thead><tr><th></th><th>Crop</th><th>Unit check</th><th class="r">y<sub>c</sub> (yield/ha)</th>
-      <th class="r">a<sub>c</sub> (min ha)</th><th class="r">m<sub>c</sub> (max ha)</th><th class="r">Historical ha</th><th class="r">Years</th></tr></thead><tbody>
-      ${[...d.unit].sort((a, b) => (coefBy[b.Crop] ? coefBy[b.Crop].y_c : -1) - (coefBy[a.Crop] ? coefBy[a.Crop].y_c : -1)).map((u) => {
-        const on = sel.has(u.Crop), r = coefBy[u.Crop];
-        const unit = u.status === "Exclude" ? `<span class="neg">${esc((u.reason.split(":")[1] || "excluded").trim())}</span>`
-          : on && !inCoef.has(u.Crop) ? "too few years" : "weight";
-        return `<tr class="${on && r ? "" : "off"}"><td><input type="checkbox" data-crop="${esc(u.Crop)}" ${on ? "checked" : ""}></td><td>${esc(u.Crop)}</td><td>${unit}</td>
-          <td class="r">${r ? fmt(r.y_c, 3) : "–"}</td><td class="r">${r ? fmt(r.lp_lo) : "–"}</td><td class="r">${r ? fmt(r.lp_hi) : "–"}</td>
-          <td class="r">${r ? fmt(r.hist_area) : "–"}</td><td class="r">${r ? r.years : "–"}</td></tr>`; }).join("")}
-    </tbody></table></div>
-    <p class="small" style="margin-top:6px"><a href="#" id="dlCoef">Download LP inputs (CSV)</a></p>
-    <h2>Yield coefficients y<sub>c</sub></h2><div id="chCoef" class="chart"></div>
-    <details><summary>Model settings (optional)</summary>
-      <p><label>Yield y<sub>c</sub>: <select id="ym">
-        <option value="mean">mean of yearly yields (default)</option><option value="median">median of yearly yields</option>
-        <option value="weighted">area-weighted (Σ production ÷ Σ area)</option></select></label></p>
-      <p><label>Bounds a<sub>c</sub>, m<sub>c</sub>: <select id="bm">
-        <option value="historical">historical min / max area (default)</option><option value="band">± band around average area</option></select></label>
-        <label id="bandBox"> band ±<input type="number" id="bp" min="5" max="100" step="5" style="width:70px" value="${st.band_pct}">%</label></p>
-      <p><label>Minimum years of data per crop: <input type="number" id="my" min="1" style="width:80px" value="${st.min_years ?? ""}" placeholder="auto"></label></p>
-      <p class="small muted">Cleaning rules (re-runs cleaning):</p>${cleaningChecks()}
-      <p><button class="btn primary" id="apply">Apply</button> <button class="btn" id="reset">Reset</button></p>
-    </details>
-    ${next("crops")}`;
-  $$("[data-crop]").forEach((c) => c.onchange = () => {
-    const cur = new Set(S.crops ?? d.selected);
-    c.checked ? cur.add(c.dataset.crop) : cur.delete(c.dataset.crop);
-    S.crops = [...cur]; invalidate(); rerender();
-  });
-  $("#cRec").onclick = () => { S.crops = null; invalidate(); rerender(); };
-  $("#cAll").onclick = () => { S.crops = d.unit.map((u) => u.Crop); invalidate(); rerender(); };
-  $("#cNone").onclick = () => { S.crops = []; invalidate(); rerender(); };
-  $("#dlCoef").onclick = (e) => { e.preventDefault(); downloadCSV(d.coef, "lp_coefficients.csv"); };
-  const cf = [...d.coef].sort((a, b) => a.y_c - b.y_c);
-  plot("#chCoef", [{ ...hbar(cf, "Crop", "y_c", C().hist, "%{y}: %{x:.3f}/ha<extra></extra>"),
-    error_x: { type: "data", array: cf.map((x) => x.yield_sd), color: C().neutral, thickness: 1.2, width: 3 } }],
-  { margin: { l: 10, r: 16, t: 6, b: 40 }, xaxis: { title: "average yield per hectare (bars: ± year-to-year s.d.)" } }, Math.max(300, 22 * cf.length + 60));
-
-  $("#ym").value = st.yield_method; $("#bm").value = st.bound_mode;
-  const band = () => $("#bandBox").classList.toggle("hidden", $("#bm").value !== "band");
-  band(); $("#bm").onchange = band;
-  const tmpClean = { ...S.cleaning };
-  $$("details [data-clean]").forEach((c) => c.onchange = () => { tmpClean[c.dataset.clean] = c.checked; });
-  $("#apply").onclick = async () => {
-    Object.assign(st, { yield_method: $("#ym").value, bound_mode: $("#bm").value, band_pct: +$("#bp").value || 30,
-      min_years: $("#my").value ? Math.max(1, +$("#my").value) : null });
-    S.crops = null; invalidate();
-    if (JSON.stringify(tmpClean) !== JSON.stringify(S.cleaning)) {
-      S.cleaning = tmpClean;
-      const sc = S.scope; S.autoPage = "crops";
-      await prepare();
-      if (sc && S.prep.hierarchy[sc.state]) { S.scope = sc; buildScope(); invalidate(); go("crops"); }
-    } else rerender();
-    toast("Settings applied.");
-  };
-  $("#reset").onclick = () => { Object.assign(st, { yield_method: "mean", bound_mode: "historical", band_pct: 30, min_years: null, ratio_thr: 250 });
-    S.crops = null; invalidate(); rerender(); toast("Settings reset."); };
-});
-
-// ------------------------------------------------------------------ shared LP output
-function allocChart(sel, alloc, planLabel) {
-  const c = C(), a = [...alloc].sort((x, y) => x.hist_area - y.hist_area);
-  plot(sel, [
-    { type: "bar", orientation: "h", name: "Historical average", y: a.map((r) => r.Crop), x: a.map((r) => r.hist_area), marker: { color: c.hist },
-      hovertemplate: "%{y}<br>historical %{x:,.0f} ha<extra></extra>" },
-    { type: "bar", orientation: "h", name: planLabel, y: a.map((r) => r.Crop), x: a.map((r) => r.x_opt), marker: { color: c.opt },
-      customdata: a.map((r) => r.change_ha), hovertemplate: "%{y}<br>plan %{x:,.0f} ha<br>change %{customdata:+,.0f} ha<extra></extra>" },
-  ], { barmode: "group", bargap: 0.3, xaxis: { title: "hectares" }, margin: { l: 10, r: 16, t: 30, b: 44 } }, Math.max(340, 30 * a.length + 90));
-}
-function allocTable(sel, alloc) {
-  table(sel, [{ k: "Crop", label: "Crop" }, { k: "y_c", label: "y<sub>c</sub>", r: 1, f: F.n3 },
-    { k: "a_c", label: "Min ha", r: 1, f: F.int }, { k: "m_c", label: "Max ha", r: 1, f: F.int },
-    { k: "hist_area", label: "Historical ha", r: 1, f: F.int }, { k: "x_opt", label: "Optimal ha", r: 1, f: F.int },
-    { k: "change_ha", label: "Change ha", r: 1, f: F.signed }, { k: "reduced_cost", label: "Reduced cost", r: 1, f: F.n4 },
-    { k: "bound_status", label: "Status", f: F.status }], alloc);
-}
-function lpDetails(r) {
-  const same = r.scipy_objective != null && Math.abs(r.objective - r.scipy_objective) <= 1e-6 * Math.abs(r.objective || 1);
-  return `<details><summary>The LP as solved (PuLP)</summary><pre>${esc(r.lp_text)}</pre></details>
-    <details><summary>Solver cross-check: PuLP vs SciPy</summary>
-      <table><tbody>
-        <tr><td>Objective, PuLP (CBC)</td><td class="r">${fmt(r.objective, 2)}</td></tr>
-        <tr><td>Objective, SciPy linprog (HiGHS)</td><td class="r">${fmt(r.scipy_objective, 2)}</td></tr>
-        <tr><td>Dual value, PuLP / SciPy</td><td class="r">${fmt(r.shadow, 6)} / ${fmt(r.scipy_shadow, 6)}</td></tr>
-      </tbody></table><p class="small ${same ? "pos" : "neg"}" style="margin-top:8px">${same ? "Both solvers agree." : "The solvers differ — check the model."}</p></details>`;
+const DECISION = (s) => (s.startsWith("at max") ? "expand" : s.startsWith("at min") ? "cut" : "marginal");
+function renderChips() {
+  const r = S.r, crops = [...r.opt1.alloc].sort((a, b) => b.hist_area - a.hist_area);
+  if (!crops.some((c) => c.Crop === S.crop)) S.crop = crops[0].Crop;
+  $("#cropChips").innerHTML = crops.map((c) =>
+    `<button type="button" class="chip${c.Crop === S.crop ? " on" : ""}" data-crop="${esc(c.Crop)}">${esc(c.Crop)}<small>${DECISION(c.bound_status)}</small></button>`).join("");
+  $$("[data-crop]").forEach((b) => b.onclick = () => { S.crop = b.dataset.crop; renderChips(); draw("crops"); });
 }
 
-// ================================================================== 4. Maximise output
-PAGES.max = () => guarded(async () => {
-  if (!$("#maxBody")) view().innerHTML = `<div id="maxBody">${loading()}</div>`;
-  const d = await cached("/api/optimize/max", { ...ctx(), L: S.L });
-  if (S.page !== "max") return;
-  const r = d.result, ok = r.status === "Optimal";
-  if (S.L == null) S.L = d.L;
-  const lo = Math.floor(d.feas.min_land * 0.9), hi = Math.ceil(Math.max(d.feas.max_land * 1.1, d.L_hist * 1.3));
-  view().innerHTML = `<div id="maxBody">
-    <h1>Optimization 1: maximise output</h1>
-    <div class="math">maximise Z = Σ<sub>c</sub> y<sub>c</sub> x<sub>c</sub> &nbsp; subject to &nbsp; Σ<sub>c</sub> x<sub>c</sub> ≤ L, &nbsp; a<sub>c</sub> ≤ x<sub>c</sub> ≤ m<sub>c</sub>, &nbsp; x<sub>c</sub> ≥ 0</div>
-    <div class="control">Land budget L: <b id="lVal">${fmt(S.L)} ha</b>
-      <input type="range" id="lSl" min="${lo}" max="${hi}" step="${Math.max(1, Math.round((hi - lo) / 400))}" value="${S.L}">
-      <div class="ends"><span>${fmt(lo)}</span><span>${fmt(hi)}</span></div>
-      <div class="row"><input type="number" id="lIn" value="${Math.round(S.L)}" style="width:150px"> ha
-        <button class="btn" id="lHist">Use historical (${fmt(d.L_hist)} ha)</button></div>
-    </div>
-    ${ok ? `<div class="nums">
-      ${num("Output gain vs history", pct(d.gain_pct, 2), true)}
-      ${num("Optimal output Z*", fmt(r.objective))}
-      ${num("Historical output", fmt(d.D_hist))}
-      ${num("Shadow price of land λ*", fmt(r.shadow, 4))}
-    </div>
-    <h2>What this means</h2><ul class="plain">${d.explain.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
-    <h2>Historical vs optimal hectares</h2><div id="chAlloc"></div>
-    <h2>Solution</h2><div id="tbAlloc"></div>
-    <p class="small"><a href="#" id="dl">Download plan (CSV)</a></p>
-    ${lpDetails(r)}` : note(`<b>No feasible plan.</b> ${esc(d.explain[0])}`, "bad")}
-    ${next("max")}</div>`;
-  const apply = (v) => { S.L = Math.max(0, +v); PAGES.max(); };
-  $("#lSl").oninput = () => { $("#lVal").textContent = fmt(+$("#lSl").value) + " ha"; $("#lIn").value = $("#lSl").value; };
-  $("#lSl").onchange = () => apply($("#lSl").value);
-  $("#lIn").onchange = () => apply($("#lIn").value);
-  $("#lHist").onclick = () => apply(d.L_hist);
-  if (!ok) return;
-  allocChart("#chAlloc", r.alloc, "Optimal (LP)");
-  allocTable("#tbAlloc", r.alloc);
-  $("#dl").onclick = (e) => { e.preventDefault(); downloadCSV(r.alloc, "max_output_plan.csv"); };
-});
+function renderModel() {
+  const r = S.r, o1 = r.opt1, o2 = r.opt2, uh = " (t)";
+  if (S.model === 1) {
+    kpis("#kpiModel", [["Land available (ha)", N(o1.L, (x) => fmt(x)), `${S.set.land_pct}% of history`], [`Historical output${uh}`, N(o1.D_hist, (x) => fmt(x))],
+      [`Optimal output${uh}`, N(o1.Z, (x) => fmt(x))], ["Change vs history", N(o1.gain_pct, (x) => pct(x)), "", o1.gain_pct > 0]]);
+    $("#modelNote").textContent = `Shadow price of land λ* = ${fmt(o1.lam, 4)} t: one more hectare adds this much output.`;
+  } else {
+    kpis("#kpiModel", [[`Output target${uh}`, N(o2.D, (x) => fmt(x)), `${S.set.target_pct}% of history`], ["Historical land (ha)", N(o2.L_hist, (x) => fmt(x))],
+      ["Minimum land (ha)", N(o2.land, (x) => fmt(x))], ["Change vs history", N(-o2.saving_pct, (x) => pct(x)), "", o2.saving_pct > 0]]);
+    $("#modelNote").textContent = o2.inv_lam != null
+      ? `Duality check: μ* = ${fmt(o2.mu, 4)} ha per tonne, and 1/λ* at that land = ${fmt(o2.inv_lam, 4)}.` +
+        (Math.abs(o2.mu - o2.inv_lam) < 1e-6 * o2.mu ? " They match." : "") : "";
+  }
+  const x2 = Object.fromEntries(o2.alloc.map((d) => [d.Crop, d.x_opt]));
+  const st = (s) => (s.startsWith("at max") ? "at max" : s.startsWith("at min") ? "at min" : "between bounds");
+  const s2 = Object.fromEntries(o2.alloc.map((d) => [d.Crop, st(d.bound_status)]));
+  $("#allocTable").innerHTML = table([
+    { k: "Crop", label: "Crop" },
+    { k: "y_c", label: "Yield y<sub>c</sub> (t/ha)", r: 1, f: (v) => fmt(v, 2) },
+    { k: "a_c", label: "Min a<sub>c</sub>", r: 1, f: (v) => fmt(v) },
+    { k: "m_c", label: "Max m<sub>c</sub>", r: 1, f: (v) => fmt(v) },
+    { k: "hist_area", label: "Historical", r: 1, f: (v) => fmt(v) },
+    { k: "x_opt", label: "Model 1", r: 1, f: (v) => (S.model === 1 ? `<b>${fmt(v)}</b>` : fmt(v)) },
+    { k: "Crop", label: "Model 2", r: 1, f: (v) => (S.model === 2 ? `<b>${fmt(x2[v])}</b>` : fmt(x2[v])) },
+    { k: "bound_status", label: "Decision", f: (v, row) => (S.model === 1 ? st(v) : s2[row.Crop]) },
+  ], o1.alloc);
+}
 
-// ================================================================== 5. Minimise land
-PAGES.min = () => guarded(async () => {
-  if (!$("#minBody")) view().innerHTML = `<div id="minBody">${loading()}</div>`;
-  const d = await cached("/api/optimize/min", { ...ctx(), target_pct: S.target });
-  if (S.page !== "min") return;
-  const r = d.result, ok = r.status === "Optimal";
-  view().innerHTML = `<div id="minBody">
-    <h1>Optimization 2: minimise land</h1>
-    <div class="math">minimise Σ<sub>c</sub> x<sub>c</sub> &nbsp; subject to &nbsp; Σ<sub>c</sub> y<sub>c</sub> x<sub>c</sub> ≥ D, &nbsp; a<sub>c</sub> ≤ x<sub>c</sub> ≤ m<sub>c</sub>, &nbsp; x<sub>c</sub> ≥ 0</div>
-    <div class="control">Production target D: <b id="tVal">${S.target}% of historical = ${fmt(d.D)}</b>
-      <input type="range" id="tSl" min="50" max="150" step="1" value="${S.target}">
-      <div class="ends"><span>50%</span><span>100% = historical output</span><span>150%</span></div>
-    </div>
-    ${ok ? `<div class="nums">
-      ${num("Land saved", `${fmt(d.saving_ha)} ha (${fmt(d.saving_pct, 2)}%)`, true)}
-      ${num("Minimum land needed", fmt(r.objective) + " ha")}
-      ${num("Historical land", fmt(d.L_hist) + " ha")}
-      ${num("Shadow price of target μ*", fmt(r.shadow, 6))}
-    </div>
-    ${d.duality && d.duality.inv_lam ? note(`<b>Duality check:</b> solving Optimization 1 with L = ${fmt(d.duality.L)} ha gives λ* = ${fmt(d.duality.lam, 6)},
-      so 1/λ* = <b>${fmt(d.duality.inv_lam, 6)}</b>, which equals μ* = <b>${fmt(d.duality.mu, 6)}</b>. Both models describe the same optimum.`) : ""}
-    <h2>What this means</h2><ul class="plain">${d.explain.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
-    <h2>Historical vs least-land hectares</h2><div id="chAlloc2"></div>
-    <h2>Solution</h2><div id="tbAlloc2"></div>
-    <p class="small"><a href="#" id="dl2">Download plan (CSV)</a></p>
-    ${lpDetails(r)}` : note(`<b>Target not reachable.</b> ${esc(d.explain[0])}`, "bad")}
-    ${next("min")}</div>`;
-  $("#tSl").oninput = () => { $("#tVal").textContent = `${$("#tSl").value}% of historical = ${fmt(d.D_hist * $("#tSl").value / 100)}`; };
-  $("#tSl").onchange = () => { S.target = +$("#tSl").value; PAGES.min(); };
-  if (!ok) return;
-  allocChart("#chAlloc2", r.alloc, "Least-land (LP)");
-  allocTable("#tbAlloc2", r.alloc);
-  $("#dl2").onclick = (e) => { e.preventDefault(); downloadCSV(r.alloc, "min_land_plan.csv"); };
-});
+function interpret() {
+  const r = S.r, al = r.opt1.alloc, o1 = r.opt1, o2 = r.opt2;
+  const up = al.filter((d) => d.bound_status.startsWith("at max")).map((d) => d.Crop);
+  const dn = al.filter((d) => d.bound_status.startsWith("at min")).map((d) => d.Crop);
+  const basic = al.find((d) => d.bound_status.startsWith("basic"));
+  const b10 = r.band.find((b) => b.band_pct === 10);
+  const items = [
+    `<b>Q1:</b> on ${fmt(o1.L)} ha (${S.set.land_pct}% of historical land), output goes from ${fmt(o1.D_hist)} to ${fmt(o1.Z)} t (<b>${pct(o1.gain_pct)}</b>).`,
+    `<b>Q2:</b> ${S.set.target_pct === 100 ? "the historical output" : `${S.set.target_pct}% of historical output`} can be produced on ${fmt(o2.land)} ha, <b>${pct(-o2.saving_pct)} land</b> vs history.`,
+    isDefault(S.set) ? "" : `These results use custom inputs (see Model inputs).`,
+    up.length ? `Land moves to the high-yield crops (${list(up)}), which reach their historical maximum.` : "",
+    dn.length ? `${dn.length} lower-yield crop${dn.length > 1 ? "s are" : " is"} held at the historical minimum.` : "",
+    basic ? `${basic.Crop} takes the remaining land; one more hectare is worth ${fmt(o1.lam, 2)} t (λ*).` : "",
+    b10 ? `With a cautious ±10% limit per crop, the gain is ${pct(b10.output_gain_pct)} output or ${fmt(b10.land_saving_pct, 1)}% less land.` : "",
+  ];
+  if (r.districts.length > 1) {
+    const d = [...r.districts].sort((p, q) => q.output_gain_pct - p.output_gain_pct);
+    items.push(`Across ${d.length} districts the gain ranges from ${pct(d[d.length - 1].output_gain_pct)} (${title(d[d.length - 1].District)}) ` +
+      `to ${pct(d[0].output_gain_pct)} (${title(d[0].District)}).`);
+  }
+  const ind = S.india[indiaKey(r.season)];
+  if (ind && ind.length > 1) {
+    const rank = [...ind].sort((a, b) => b.gain_pct - a.gain_pct).findIndex((x) => x.state === r.state) + 1;
+    if (rank) items.push(`Among ${ind.length} states solved for ${r.season}, ${r.state} ranks ${rank} by output gain.`);
+  }
+  $("#interp").innerHTML = items.filter(Boolean).map((s) => `<li>${s}</li>`).join("");
+}
 
-// ================================================================== 6. Sensitivity
-PAGES.whatif = () => guarded(async () => {
-  view().innerHTML = loading("Solving the LP for many land budgets…");
-  const d = await cached("/api/sensitivity", { ...ctx(), shock: -15, shock_crops: [] });
-  if (S.page !== "whatif") return;
-  view().innerHTML = `
-    <h1>Sensitivity analysis</h1>
-    <p class="muted">${esc(scopeText())}.</p>
-    <div class="two">
-      <div><h2>Optimal output Z* vs land L</h2><div id="chZL" class="chart"></div></div>
-      <div><h2>Shadow price λ* vs land L</h2><div id="chLam" class="chart"></div></div>
-    </div>
-    <p class="small muted">The curve flattens (diminishing returns) and λ* falls in steps each time another crop reaches its maximum area.
-      The dotted line is the historical land.</p>
-    <h2>Gain when each crop may move only ±p% from its historical area</h2><div id="chBand" class="chart"></div>
-    <h2>Yield ranging (at historical land, λ* = ${fmt(d.lam, 4)})</h2>
-    <p class="small muted">How far each crop's yield can change before the optimal plan changes.</p>
-    <div id="tbRange"></div>
-    ${next("whatif")}`;
-  const c = C(), land = d.land.filter((r) => r.Z != null);
-  plot("#chZL", [{ type: "scatter", mode: "lines", x: land.map((r) => r.L), y: land.map((r) => r.Z), line: { color: c.hist, width: 2.5 },
-    hovertemplate: "L %{x:,.0f} ha<br>Z* %{y:,.0f}<extra></extra>" }],
-  { shapes: [vline(d.L_hist)], xaxis: { title: "land budget L (ha)" }, yaxis: { title: "Z*" } }, 290);
-  plot("#chLam", [{ type: "scatter", mode: "lines", line: { shape: "hv", color: c.opt, width: 2.5 }, x: land.map((r) => r.L), y: land.map((r) => r.shadow_price),
-    hovertemplate: "L %{x:,.0f} ha<br>λ* %{y:.3f}<extra></extra>" }],
-  { shapes: [vline(d.L_hist)], xaxis: { title: "land budget L (ha)" }, yaxis: { title: "λ*" } }, 290);
-  plot("#chBand", [
-    { type: "scatter", mode: "lines+markers", name: "Output gain (Opt 1)", x: d.band.map((r) => r.band_pct), y: d.band.map((r) => r.output_gain_pct), line: { color: c.hist, width: 2.5 } },
-    { type: "scatter", mode: "lines+markers", name: "Land saving (Opt 2)", x: d.band.map((r) => r.band_pct), y: d.band.map((r) => r.land_saving_pct), line: { color: c.opt, width: 2.5 } },
-  ], { xaxis: { title: "allowed change per crop (±%)" }, yaxis: { title: "%" }, hovermode: "x unified", margin: { l: 60, r: 16, t: 30, b: 44 } }, 290);
-  table("#tbRange", [{ k: "Crop", label: "Crop" }, { k: "y_c", label: "Yield now", r: 1, f: F.n3 }, { k: "status", label: "Status", f: F.status },
-    { k: "allowable_min_yield", label: "Plan holds if yield ≥", r: 1, f: F.n3 },
-    { k: "allowable_max_yield", label: "and ≤", r: 1, f: (v) => (v == null ? "no limit" : fmt(v, 3)) }], d.ranging);
-});
-
-// ================================================================== 7. Districts
-PAGES.districts = () => guarded(async () => {
-  view().innerHTML = loading("Solving both models for every district…");
-  const d = await cached("/api/districts", ctx());
-  if (S.page !== "districts") return;
-  const head = `<h1>District comparison</h1><p class="muted">Both models solved separately for every district of ${esc(S.scope.state)}
-    (${esc(S.scope.season)}, ${S.scope.years[0]}–${S.scope.years[1]}).</p>`;
-  if (!d.rows.length) { view().innerHTML = head + note("Not enough districts with 2 or more crops in this scope."); return; }
-  const s = d.summary;
-  view().innerHTML = `${head}
-    <div class="nums">
-      ${num("Districts", fmt(s.n))}
-      ${num("Median output gain", pct(s.median_gain, 1), true)}
-      ${num("Median land saving", fmt(s.median_saving, 1) + "%")}
-      ${num("Highest gain", esc(title(s.best)))}
-    </div>
-    <h2>Output gain and land saving by district</h2><div id="chMD"></div>
-    <h2>All districts</h2><div id="tbMD"></div>
-    <p class="small"><a href="#" id="dl3">Download (CSV)</a></p>
-    ${next("districts")}`;
-  const c = C(), r = [...d.rows].sort((a, b) => a.output_gain_pct - b.output_gain_pct);
-  plot("#chMD", [
-    { type: "bar", orientation: "h", name: "Output gain % (Opt 1)", y: r.map((x) => title(x.District)), x: r.map((x) => x.output_gain_pct), marker: { color: c.hist } },
-    { type: "bar", orientation: "h", name: "Land saving % (Opt 2)", y: r.map((x) => title(x.District)), x: r.map((x) => x.land_saving_pct), marker: { color: c.opt } },
-  ], { barmode: "group", bargap: 0.25, margin: { l: 10, r: 16, t: 30, b: 44 }, xaxis: { title: "%" } }, Math.max(360, 28 * r.length + 90));
-  table("#tbMD", [{ k: "District", label: "District", f: F.title }, { k: "crops", label: "Crops", r: 1 }, { k: "land_L", label: "Land (ha)", r: 1, f: F.int },
-    { k: "output_gain_pct", label: "Output gain", r: 1, f: F.pct }, { k: "land_saving_pct", label: "Land saving %", r: 1, f: (v) => fmt(v, 1) },
-    { k: "land_shadow_price", label: "λ*", r: 1, f: F.n3 }, { k: "biggest_expansion", label: "Crop expanded most" }], d.rows, { search: true });
-  $("#dl3").onclick = (e) => { e.preventDefault(); downloadCSV(d.rows, "district_comparison.csv"); };
-});
-
-// ================================================================== Model (reference)
-PAGES.method = function () {
-  view().innerHTML = `
-    <h1>The model</h1>
-    <p>Land is fixed and crops differ in yield. Using historical yield records, how should land be re-allocated across crops?</p>
-    <h2>Optimization 1: maximise output</h2>
-    <div class="math">maximise Z = Σ<sub>c</sub> y<sub>c</sub> x<sub>c</sub><br>subject to Σ<sub>c</sub> x<sub>c</sub> ≤ L, &nbsp; a<sub>c</sub> ≤ x<sub>c</sub> ≤ m<sub>c</sub>, &nbsp; x<sub>c</sub> ≥ 0</div>
-    <h2>Optimization 2: minimise land</h2>
-    <div class="math">minimise Σ<sub>c</sub> x<sub>c</sub><br>subject to Σ<sub>c</sub> y<sub>c</sub> x<sub>c</sub> ≥ D, &nbsp; a<sub>c</sub> ≤ x<sub>c</sub> ≤ m<sub>c</sub>, &nbsp; x<sub>c</sub> ≥ 0</div>
-    <h2>Symbols</h2>
-    <div class="twrap"><table><thead><tr><th>Symbol</th><th>Meaning</th><th>Taken from the data as</th></tr></thead><tbody>
-      <tr><td>x<sub>c</sub></td><td>hectares given to crop c (decision variable)</td><td>—</td></tr>
-      <tr><td>y<sub>c</sub></td><td>yield of crop c</td><td>average over the years of (Σ production ÷ Σ area)</td></tr>
-      <tr><td>a<sub>c</sub>, m<sub>c</sub></td><td>minimum / maximum hectares</td><td>smallest / largest yearly area in the window</td></tr>
-      <tr><td>L</td><td>land budget</td><td>average yearly area of the selected crops</td></tr>
-      <tr><td>D</td><td>production target</td><td>Σ y<sub>c</sub> × average area (historical output)</td></tr>
-      <tr><td>λ*, μ*</td><td>shadow prices of land and of the target</td><td>dual values from the solver; μ* = 1/λ*</td></tr>
-    </tbody></table></div>
-    <h2>Workflow</h2>
-    <p>Load data → clean → check production units → average yields → build LP → solve (PuLP, cross-checked with SciPy) →
-      compare with historical allocation → sensitivity and district comparison.</p>
-    <h2>Why the solution looks like this</h2>
-    <p>With one land constraint and bounds on each crop, the LP is a continuous knapsack: every crop gets its minimum, then the remaining
-      land goes to the highest-yield crops first, each up to its maximum. The one crop left between its bounds is the marginal crop, and its
-      yield equals the shadow price λ*.</p>
-    <h2>Assumptions and limitations</h2>
-    <ul class="plain">
-      <li>Production units must match: crops counted in nuts or bales are excluded.</li>
-      <li>Yields are historical averages; weather variation is not modelled.</li>
-      <li>Output, not profit: the dataset has no price or cost data.</li>
-      <li>Not modelled: soil, irrigation, labour, crop rotation, prices and demand.</li>
-    </ul>
-    <h2>References</h2>
-    <ol class="small muted">
-      <li>H. A. Taha, <i>Operations Research: An Introduction</i>, 10th ed., Pearson, 2017.</li>
-      <li>S. Wankhade &amp; H. Lunge, LP technique for optimum resource allocation in agricultural production, Akola district, 2012.</li>
-      <li>F. Majeke et al., Linear programming approach — application in agriculture, 2020.</li>
-      <li>S. Supriya et al., Optimal crop plans using LP in Jayashankar Bhupalpally district, Telangana, 2022.</li>
-      <li>K. K. Paidipati &amp; S. R. Padi, Optimal programming problems for crop planning and agricultural resource management, 2017.</li>
-      <li>X. Liang, LP approach in agricultural production-land allocation, Springer, 2023.</li>
-      <li>MoA&amp;FW, Govt. of India, District-wise Season-wise Crop Production Statistics (1997–2020-21), data.gov.in.</li>
-    </ol>`;
+// ------------------------------------------------------------------ charts (drawn when their page is visible)
+const CHARTS = {
+  async overview(r) {
+    if (!S.geo) S.geo = await (await fetch("/static/india_states.json")).json();
+    const ind = S.india[indiaKey(r.season)] || [];
+    map("#chIndia", S.geo, ind.map((x) => x.state), ind.map((x) => x.gain_pct),
+      ind.map((x) => `<b>${x.state}</b><br>output gain ${pct(x.gain_pct)}<br>land saved ${fmt(x.saving_pct, 1)}%<br>${x.crops} crops`),
+      { pick: r.state, onClick: selectState, height: 520 });
+    const s = [...ind].sort((a, b) => a.gain_pct - b.gain_pct);
+    plot("#chStates", [{ type: "bar", orientation: "h", y: s.map((x) => x.state), x: s.map((x) => x.gain_pct),
+      marker: { color: s.map((x) => (x.state === r.state ? ACC : ACC_L)) }, hovertemplate: "%{y}: %{x:+.1f}%<extra></extra>" }],
+      { showlegend: false, margin: { l: 150, r: 16, t: 8, b: 40 }, xaxis: { ticksuffix: "%" }, yaxis: { tickfont: { size: 11 } } }, 520);
+    const el = $("#chStates"); el.removeAllListeners?.("plotly_click"); el.on("plotly_click", (e) => selectState(e.points[0].y));
+  },
+  data(r) {
+    const ca = [...r.crop_area].reverse();
+    plot("#chCropArea", [{ type: "bar", orientation: "h", y: ca.map((d) => d.Crop), x: ca.map((d) => d.area),
+      marker: { color: ca.map((d) => (d.pooled ? ACC : GREY)) }, hovertemplate: "%{y}: %{x:,.0f} ha/yr<extra></extra>" }],
+      { showlegend: false, xaxis: { title: "hectares per year" } }, 380);
+    plot("#chYearly", [
+      { type: "scatter", mode: "lines+markers", name: "Area (ha)", x: r.yearly.x, y: r.yearly.area, line: { color: MUTED, width: 2 }, marker: { size: 5 } },
+      { type: "scatter", mode: "lines+markers", name: "Production (t)", x: r.yearly.x, y: r.yearly.prod, yaxis: "y2", line: { color: ACC, width: 2.5 }, marker: { size: 5 } },
+    ], { yaxis: { title: "area (ha)" }, yaxis2: { title: { text: "production (t)", font: { size: 12, color: MUTED } }, overlaying: "y", side: "right", fixedrange: true, showgrid: false },
+      margin: { l: 60, r: 60, t: 8, b: 40 } }, 380);
+    plot("#chTrend", Object.entries(r.trend).map(([c, t], i) => ({ type: "scatter", mode: "lines", name: c, x: t.x, y: t.y,
+      line: { color: TREND[i % TREND.length], width: 2, dash: i === 4 ? "dot" : "solid" }, hovertemplate: `${c} %{x}: %{y:.2f} t/ha<extra></extra>` })),
+      { yaxis: { title: "yield (t/ha)" } }, 320);
+    const yrs = Object.keys(r.rows_per_year).map(Number), inWin = (y) => y >= r.years[0] && y <= r.years[1];
+    plot("#chYears", [{ type: "bar", x: yrs, y: yrs.map((y) => r.rows_per_year[y]), marker: { color: yrs.map((y) => (inWin(y) ? ACC : GREY)) },
+      hovertemplate: "%{x}: %{y:,} records<extra></extra>" }], { showlegend: false, yaxis: { title: "records" } }, 320);
+    const c = [...r.coef].sort((a, b) => b.y_c - a.y_c);
+    plot("#chYield", [{ type: "bar", x: c.map((d) => d.Crop), y: c.map((d) => d.y_c), marker: { color: ACC },
+      error_y: { type: "data", array: c.map((d) => d.yield_sd), color: INK, thickness: 1.1, width: 3 },
+      hovertemplate: "%{x}: %{y:.2f} t/ha<extra></extra>" }],
+      { showlegend: false, yaxis: { title: "yield (t/ha)" }, xaxis: { tickangle: -40 } }, 380);
+  },
+  results(r) {
+    const o = S.model === 1 ? r.opt1 : r.opt2, label = `Model ${S.model}`;
+    const a = [...o.alloc].sort((p, q) => p.y_c - q.y_c), h = Math.max(320, 22 * a.length + 80);
+    plot("#chAlloc", [
+      { type: "bar", orientation: "h", name: "Historical", y: a.map((d) => d.Crop), x: a.map((d) => d.hist_area), marker: { color: GREY },
+        hovertemplate: "%{y}: %{x:,.0f} ha<extra>historical</extra>" },
+      { type: "bar", orientation: "h", name: label, y: a.map((d) => d.Crop), x: a.map((d) => d.x_opt), marker: { color: ACC },
+        hovertemplate: `%{y}: %{x:,.0f} ha<extra>${label}</extra>` },
+    ], { barmode: "group", xaxis: { title: "hectares" } }, h);
+    plot("#chChange", [{ type: "bar", orientation: "h", y: a.map((d) => d.Crop), x: a.map((d) => d.change_ha),
+      marker: { color: a.map((d) => (d.change_ha >= 0 ? ACC : GREY)) }, hovertemplate: "%{y}: %{x:+,.0f} ha<extra></extra>" }],
+      { showlegend: false, xaxis: { title: "hectares gained (green) or given up (grey)", zeroline: true, zerolinecolor: INK } }, h);
+    const w = [...o.alloc].sort((p, q) => q.y_c - p.y_c).filter((d) => Math.abs(d.y_c * d.change_ha) > 1e-6);
+    plot("#chOutput", [{ type: "waterfall", orientation: "v", x: [...w.map((d) => d.Crop), "Total"],
+      y: [...w.map((d) => d.y_c * d.change_ha), 0], measure: [...w.map(() => "relative"), "total"],
+      increasing: { marker: { color: ACC } }, decreasing: { marker: { color: GREY } }, totals: { marker: { color: INK } },
+      connector: { line: { color: "#ddd", width: 1 } }, hovertemplate: "%{x}: %{y:+,.0f} t<extra></extra>" }],
+      { showlegend: false, yaxis: { title: "output change (t)" }, xaxis: { tickangle: -40 }, transition: { duration: 0 } }, 380);
+  },
+  model(r) {
+    const b = S.base[`${r.state}|${r.season}`] || r, custom = !isDefault(S.set);
+    const now = Object.fromEntries(r.opt1.alloc.map((d) => [d.Crop, d.x_opt]));
+    const a = [...b.opt1.alloc].sort((p, q) => p.y_c - q.y_c);
+    const first = custom ? { name: "Default inputs", x: a.map((d) => d.x_opt) } : { name: "Historical", x: a.map((d) => d.hist_area) };
+    plot("#chCompare", [
+      { type: "bar", orientation: "h", name: first.name, y: a.map((d) => d.Crop), x: first.x, marker: { color: GREY },
+        hovertemplate: `%{y}: %{x:,.0f} ha<extra>${first.name}</extra>` },
+      { type: "bar", orientation: "h", name: custom ? "Your inputs" : "Model 1 plan", y: a.map((d) => d.Crop), x: a.map((d) => now[d.Crop] ?? 0),
+        marker: { color: ACC }, hovertemplate: "%{y}: %{x:,.0f} ha<extra>plan</extra>" },
+    ], { barmode: "group", xaxis: { title: "hectares (Model 1)" } }, Math.max(320, 22 * a.length + 80));
+  },
+  async crops(r) {
+    if (!S.geo) S.geo = await (await fetch("/static/india_states.json")).json();
+    const crop = S.crop, key = `${crop}|${r.season}`;
+    if (!S.cropData[key]) S.cropData[key] = await api(`/api/crop?crop=${encodeURIComponent(crop)}&season=${encodeURIComponent(r.season)}`);
+    if (crop !== S.crop) return;                                  // another chip was clicked meanwhile
+    const rows = S.cropData[key], a = r.opt1.alloc.find((x) => x.Crop === crop);
+    const sorted = [...rows].sort((p, q) => q.yield_ - p.yield_), rank = sorted.findIndex((x) => x.state === r.state) + 1;
+    const here = rows.find((x) => x.state === r.state);
+    kpis("#kpiCrop", [
+      ["Yield here", N(here ? here.yield_ : null, (x) => fmt(x, 2) + " t/ha"), `LP coefficient y<sub>c</sub> = ${fmt(a.y_c, 2)}`],
+      ["Rank in India", rank ? `${rank} of ${rows.length}` : "–", `states growing ${crop} in ${r.season}`],
+      ["Model 1 decision", DECISION(a.bound_status), a.bound_status.startsWith("basic") ? "takes the remaining land" : "bound reached"],
+      ["Change in area", N(a.change_ha, (x) => (x >= 0 ? "+" : "−") + fmt(Math.abs(x)) + " ha"), `${pct(100 * a.change_ha / a.hist_area)} vs history`, a.change_ha > 0],
+    ]);
+    $("#cropMapNote").textContent = `${crop} · ${r.season}`;
+    map("#chCropMap", S.geo, rows.map((x) => x.state), rows.map((x) => x.yield_),
+      rows.map((x) => `<b>${x.state}</b><br>${crop}: ${fmt(x.yield_, 2)} t/ha<br>${big(x.area)} ha per year`),
+      { pick: r.state, onClick: selectState, height: 520, suffix: "", label: "t/ha" });
+    const top = sorted.slice(0, 20);
+    if (here && !top.includes(here)) top.push(here);
+    const b = top.reverse();
+    plot("#chCropRank", [{ type: "bar", orientation: "h", y: b.map((x) => x.state), x: b.map((x) => x.yield_),
+      marker: { color: b.map((x) => (x.state === r.state ? ACC : ACC_L)) }, hovertemplate: "%{y}: %{x:.2f} t/ha<extra></extra>" }],
+      { showlegend: false, margin: { l: 150, r: 16, t: 8, b: 40 }, xaxis: { title: "yield (t/ha)" }, yaxis: { tickfont: { size: 11 } } }, 520);
+    const el = $("#chCropRank"); el.removeAllListeners?.("plotly_click"); el.on("plotly_click", (e) => selectState(e.points[0].y));
+  },
+  sensitivity(r) {
+    const L0 = r.opt1.L;
+    const vline = (ys) => ({ type: "scatter", mode: "lines", name: "Historical land", x: [L0, L0], y: ys, line: { color: MUTED, dash: "dot", width: 1.5 }, hoverinfo: "skip" });
+    plot("#chCurve", [{ type: "scatter", mode: "lines", name: "Z*(L)", x: r.curve.L, y: r.curve.Z, line: { color: ACC, width: 2.5 },
+      fill: "tozeroy", fillcolor: "rgba(47,111,78,.08)", hovertemplate: "L = %{x:,.0f} ha<br>Z* = %{y:,.0f} t<extra></extra>" },
+      vline([0, Math.max(...r.curve.Z)])], { xaxis: { title: "land budget L (ha)" }, yaxis: { title: "optimal output (t)" } }, 300);
+    const lam = r.curve.lam.map((v) => v ?? null);
+    plot("#chLam", [{ type: "scatter", mode: "lines", name: "λ*(L)", x: r.curve.L, y: lam, line: { color: ACC, width: 2.5, shape: "hv" },
+      hovertemplate: "L = %{x:,.0f} ha<br>λ* = %{y:.3f} t/ha<extra></extra>" }, vline([0, Math.max(...lam.filter((v) => v != null))])],
+      { xaxis: { title: "land budget L (ha)" }, yaxis: { title: "λ* (t per ha)" } }, 300);
+    plot("#chBand", [
+      { type: "scatter", mode: "lines+markers", name: "Model 1: output gain %", x: r.band.map((b) => b.band_pct), y: r.band.map((b) => b.output_gain_pct),
+        line: { color: ACC, width: 2.5 }, marker: { size: 7 }, hovertemplate: "±%{x}%: %{y:+.1f}%<extra></extra>" },
+      { type: "scatter", mode: "lines+markers", name: "Model 2: land saved %", x: r.band.map((b) => b.band_pct), y: r.band.map((b) => b.land_saving_pct),
+        line: { color: MUTED, width: 2.5, dash: "dash" }, marker: { size: 7 }, hovertemplate: "±%{x}%: %{y:.1f}%<extra></extra>" },
+    ], { xaxis: { title: "each crop may change by ±p% of its average area", ticksuffix: "%" }, yaxis: { title: "%" } }, 300);
+  },
+  districts(r) {
+    const has = r.districts.length > 1;
+    $("#distNote").textContent = has ? `Both models solved separately for each of ${r.districts.length} districts in ${r.state}, each with its own land, output and bounds.`
+      : `${r.state} has fewer than two districts with enough ${r.season} data to compare.`;
+    $$("#districts .charts").forEach((el) => el.classList.toggle("hidden", !has));
+    if (!has) return;
+    const d = [...r.districts].sort((p, q) => p.output_gain_pct - q.output_gain_pct);
+    if (r.district_geo && r.district_geo.features.length) {
+      const g = Object.fromEntries(d.map((x) => [x.District, x]));
+      const ids = r.district_geo.features.map((f) => f.id);
+      map("#chDistMap", r.district_geo, ids, ids.map((i) => g[i].output_gain_pct),
+        ids.map((i) => `<b>${title(i)}</b><br>output gain ${pct(g[i].output_gain_pct)}<br>land saved ${fmt(g[i].land_saving_pct, 1)}%`),
+        { height: 520 });
+    }
+    plot("#chDist", [
+      { type: "bar", orientation: "h", name: "Output gain % (Model 1)", y: d.map((x) => title(x.District)), x: d.map((x) => x.output_gain_pct), marker: { color: ACC } },
+      { type: "bar", orientation: "h", name: "Land saved % (Model 2)", y: d.map((x) => title(x.District)), x: d.map((x) => x.land_saving_pct), marker: { color: ACC_L } },
+    ], { barmode: "group", xaxis: { title: "%" } }, Math.max(420, 22 * d.length + 80));
+    plot("#chDistScatter", [{ type: "scatter", mode: "markers", x: d.map((x) => x.crops), y: d.map((x) => x.output_gain_pct),
+      text: d.map((x) => title(x.District)), marker: { color: ACC, size: 10, opacity: 0.75, line: { color: "#fff", width: 1 } },
+      hovertemplate: "%{text}<br>%{x} crops · %{y:+.1f}%<extra></extra>" }],
+      { showlegend: false, xaxis: { title: "number of crops in the district's LP", dtick: 2 }, yaxis: { title: "output gain %" } }, 320);
+  },
 };
+function draw(page) { if (S.r && CHARTS[page]) CHARTS[page](S.r); }
 
-// ================================================================== boot
-$("#newDataBtn").onclick = () => resetAll();
-// Deep links, e.g. /?load=demo&page=max  or  /?load=gov&page=districts
-const QP = new URLSearchParams(location.search);
-S.autoPage = { data: "home" }[QP.get("page")] || QP.get("page");
-if (QP.get("load")) loadBuiltin(QP.get("load")); else go(S.autoPage === "method" ? "method" : "home");
+// ------------------------------------------------------------------ start
+show();
+(async () => {
+  status("Loading the dataset (about 10 s the first time)…");
+  try {
+    S.meta = await api("/api/meta");
+    S.seasons = S.meta.seasons;
+    const q = new URLSearchParams(location.search), st = S.seasons[q.get("state")] ? q.get("state") : S.meta.state;
+    for (const [p, k] of [["land", "land_pct"], ["target", "target_pct"], ["band", "band_pct"], ["pulse", "pulse_share"]]) if (q.has(p)) S.set[k] = +q.get(p);
+    if (["historical", "band"].includes(q.get("bounds"))) S.set.bounds = q.get("bounds");
+    if (YIELD[q.get("yield")]) S.set.yield_method = q.get("yield");
+    fillSelects(st, S.seasons[st].includes(q.get("season")) ? q.get("season") : S.seasons[st].includes(S.meta.season) ? S.meta.season : S.seasons[st][0]);
+    await run();
+  } catch (e) { status(e.message, true); }
+})();

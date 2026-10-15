@@ -124,6 +124,14 @@ NON_WEIGHT_UNITS = {
 }
 
 
+# Pulse crops, for the optional "minimum share of land under pulses" constraint.
+PULSE_CROPS = {
+    "Arhar/Tur", "Bean", "Blackgram", "Cowpea(Lobia)", "Gram", "Horse-gram", "Khesari", "Lab-Lab", "Lentil",
+    "Masoor", "Moong(Green Gram)", "Moth", "Other Kharif pulses", "Other Rabi pulses", "Other Summer Pulses",
+    "Peas & beans (Pulses)", "Rajmash Kholar", "Ricebean (nagadal)", "Urad", "other misc. pulses",
+}
+
+
 @dataclass
 class CleaningReport:
     rows_in: int = 0
@@ -390,40 +398,56 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9_]", "_", s)
 
 
-def _scipy(c, model, rhs):
-    """Solve with SciPy linprog (HiGHS). Returns (res, objective, dual)."""
+def _share_row(c, share):
+    """Row for  share * sum_c x_c - sum_{c in group} x_c <= 0  (group gets at least `share` of the land)."""
+    crops, frac = share
+    g = c["Crop"].isin(crops).astype(float).values
+    return frac - g                                   # coefficient frac for every crop, frac-1 for group crops
+
+
+def _scipy(c, model, rhs, share=None):
+    """Solve with SciPy linprog (HiGHS). Returns (res, objective, dual of the land/target row)."""
     bounds = list(zip(c["lo"], c["hi"]))
     if model == "max":
-        res = linprog(-c["y_c"].values, A_ub=np.ones((1, len(c))), b_ub=[rhs],
-                      bounds=bounds, method="highs")
-        if res.status != 0:
-            return res, None, None
-        return res, -res.fun, -res.ineqlin.marginals[0]
-    res = linprog(np.ones(len(c)), A_ub=-c["y_c"].values.reshape(1, -1), b_ub=[-rhs],
-                  bounds=bounds, method="highs")
+        A, b, obj, sign = [np.ones(len(c))], [rhs], -c["y_c"].values, -1
+    else:
+        A, b, obj, sign = [-c["y_c"].values], [-rhs], np.ones(len(c)), 1
+    if share:
+        A.append(_share_row(c, share)); b.append(0.0)
+    res = linprog(obj, A_ub=np.vstack(A), b_ub=b, bounds=bounds, method="highs")
     if res.status != 0:
         return res, None, None
-    return res, res.fun, -res.ineqlin.marginals[0]
+    return res, sign * res.fun, -res.ineqlin.marginals[0]
 
 
-def _solve(coef, model, rhs, use_pulp=True) -> LPResult:
+def lp_model(c, model, rhs, share=None):
+    """Build Optimization 1 (model='max', rhs=L) or Optimization 2 (model='min', rhs=D) in PuLP.
+    share = (crops, fraction) adds: land under those crops >= fraction of all land used."""
+    sense = pulp.LpMaximize if model == "max" else pulp.LpMinimize
+    prob = pulp.LpProblem("Max_Agricultural_Output" if model == "max" else "Min_Land_For_Target", sense)
+    x = {r.Crop: pulp.LpVariable(f"x_{_safe_name(r.Crop)}", lowBound=r.lo, upBound=r.hi)  # a_c <= x_c <= m_c
+         for r in c.itertuples()}
+    output = pulp.lpSum(r.y_c * x[r.Crop] for r in c.itertuples())  # sum y_c x_c
+    land = pulp.lpSum(x.values())                                  # sum x_c
+    if model == "max":
+        prob += output, "Total_Output"
+        prob += land <= rhs, "Land"
+    else:
+        prob += land, "Total_Land"
+        prob += output >= rhs, "Target"
+    if share:
+        crops, frac = share
+        prob += pulp.lpSum(x[k] for k in x if k in crops) >= frac * land, "Group_share"
+    return prob, x
+
+
+def _solve(coef, model, rhs, use_pulp=True, share=None) -> LPResult:
     c = _ensure_bounds(coef).reset_index(drop=True)
-    res, sp_obj, sp_dual = _scipy(c, model, rhs)
+    res, sp_obj, sp_dual = _scipy(c, model, rhs, share)
     name = "Max Output" if model == "max" else "Min Land"
 
     if use_pulp:
-        sense = pulp.LpMaximize if model == "max" else pulp.LpMinimize
-        prob = pulp.LpProblem("Max_Agricultural_Output" if model == "max" else "Min_Land_For_Target", sense)
-        x = {r.Crop: pulp.LpVariable(f"x_{_safe_name(r.Crop)}", lowBound=r.lo, upBound=r.hi)
-             for r in c.itertuples()}
-        output = pulp.lpSum(r.y_c * x[r.Crop] for r in c.itertuples())
-        land = pulp.lpSum(x.values())
-        if model == "max":
-            prob += output, "Total_Output"
-            prob += land <= rhs, "Land"
-        else:
-            prob += land, "Total_Land"
-            prob += output >= rhs, "Target"
+        prob, x = lp_model(c, model, rhs, share)
         prob.solve(pulp.PULP_CBC_CMD(msg=False))
         status = pulp.LpStatus[prob.status]
         ok = status == "Optimal"
@@ -456,14 +480,14 @@ def _solve(coef, model, rhs, use_pulp=True) -> LPResult:
     return LPResult(name, status, obj, a, shadow, sp_obj, sp_dual, text)
 
 
-def solve_max_output(coef: pd.DataFrame, L: float, use_pulp=True) -> LPResult:
+def solve_max_output(coef: pd.DataFrame, L: float, use_pulp=True, share=None) -> LPResult:
     """Optimization 1:  max sum_c y_c x_c  s.t.  sum_c x_c <= L,  a_c <= x_c <= m_c,  x_c >= 0."""
-    return _solve(coef, "max", L, use_pulp)
+    return _solve(coef, "max", L, use_pulp, share)
 
 
-def solve_min_land(coef: pd.DataFrame, D: float, use_pulp=True) -> LPResult:
+def solve_min_land(coef: pd.DataFrame, D: float, use_pulp=True, share=None) -> LPResult:
     """Optimization 2:  min sum_c x_c  s.t.  sum_c y_c x_c >= D,  a_c <= x_c <= m_c,  x_c >= 0."""
-    return _solve(coef, "min", D, use_pulp)
+    return _solve(coef, "min", D, use_pulp, share)
 
 
 def _lp_text(prob) -> str:
@@ -501,11 +525,11 @@ def historical_baseline(coef):
 # --------------------------------------------------------------------------
 # 7. Sensitivity analysis (Review III)
 # --------------------------------------------------------------------------
-def parametric_land(coef, L_values):
+def parametric_land(coef, L_values, share=None):
     """Z*(L) over a sweep of land budgets; slope of the curve = shadow price of land."""
     rows = []
     for L in L_values:
-        r = solve_max_output(coef, L, use_pulp=False)
+        r = solve_max_output(coef, L, use_pulp=False, share=share)
         rows.append(dict(L=L, Z=r.objective, shadow_price=r.shadow_price, status=r.status))
     return pd.DataFrame(rows)
 
@@ -559,14 +583,14 @@ def yield_shock(coef, L, shock_pct, crops=None):
     return solve_max_output(c, L, use_pulp=False)
 
 
-def bound_band_sweep(coef, pcts):
+def bound_band_sweep(coef, pcts, share=None):
     """How much of the gain survives if re-allocation is limited to +/-p% of historical area."""
     L, D = historical_baseline(coef)
     rows = []
     for p in pcts:
         c = apply_bounds(coef, "band", p)
-        r1 = solve_max_output(c, L, use_pulp=False)
-        r2 = solve_min_land(c, D, use_pulp=False)
+        r1 = solve_max_output(c, L, use_pulp=False, share=share)
+        r2 = solve_min_land(c, D, use_pulp=False, share=share)
         rows.append(dict(band_pct=p,
                          output_gain_pct=100 * (r1.objective - D) / D if r1.ok else np.nan,
                          land_saving_pct=100 * (L - r2.objective) / L if r2.ok else np.nan))
@@ -577,7 +601,7 @@ def bound_band_sweep(coef, pcts):
 # 8. Multi-district comparison (Review III)
 # --------------------------------------------------------------------------
 def multi_district(d_scope, crops, yield_method="mean", bound_mode="historical", pct=30.0,
-                   min_years=1, min_crops=2):
+                   min_years=1, min_crops=2, share=None):
     """Run both LPs independently for every district (L, D = that district's historical values)."""
     rows = []
     for dist, g in d_scope.groupby("District_Name"):
@@ -586,8 +610,8 @@ def multi_district(d_scope, crops, yield_method="mean", bound_mode="historical",
             continue
         coef = apply_bounds(coef, bound_mode, pct)
         L, D = historical_baseline(coef)
-        r1 = solve_max_output(coef, L, use_pulp=False)
-        r2 = solve_min_land(coef, D, use_pulp=False)
+        r1 = solve_max_output(coef, L, use_pulp=False, share=share)
+        r2 = solve_min_land(coef, D, use_pulp=False, share=share)
         if not r1.ok or D <= 0:
             continue
         top = r1.alloc.sort_values("change_ha", ascending=False).iloc[0]["Crop"]

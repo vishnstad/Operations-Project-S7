@@ -96,7 +96,7 @@ Both models were run separately for each of 27 districts. The median gain is **+
 
 ## 7. Validation and tool
 * **Synthetic data** ("Demo Pradesh", 1,664 rows) contains planted defects: duplicates, zero rows, aggregates, aliases, nut and bale units, and a drought year. All of them are caught.
-* **Web app** (`python webapp/server.py`) has a simple tab-by-tab interface. Users can upload any CSV or Excel file, adjust the models with sliders, read plain-English explanations, run sensitivity analysis and compare districts. It runs on the same engine as this report, so the numbers are identical.
+* **Web interface** (`python webapp/server.py`) solves both models for any state and season, maps the output gain across India and by district, and charts the plan against history. It uses the same engine as this report, so the numbers are identical.
 
 ## 8. Limitations
 * **Weight objective:** a tonne of onion counts the same as a tonne of pulses, so heavy crops are favoured.
@@ -118,4 +118,4 @@ Using public government data alone, re-planning Karnataka's Kharif crop mix coul
 6. X. Liang, LP approach in agricultural production-land allocation, Springer, 2023.
 7. MoA&FW, GoI, *District-wise, Season-wise Crop Production Statistics (1997–2020-21)*, data.gov.in.
 
-**Reproduce:** run `python run_case_study.py` to regenerate all numbers and figures. In the web app, open `http://127.0.0.1:8000/?load=gov&page=max`. Full tables are in `results/case_study_results.md`.
+**Reproduce:** run `python run_case_study.py` to regenerate all numbers and figures. Full tables are in `results/case_study_results.md`.

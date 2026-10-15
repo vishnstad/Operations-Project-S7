@@ -64,15 +64,20 @@ Land is fixed, yet crops differ sharply in yield, and land is usually allocated 
 rather than by comparing district-level yield records. This paper formulates crop-area
 allocation as two linear programs (LP): maximising total output for a fixed land budget, and
 minimising the land needed for a production target. All coefficients are taken from the
-Government of India district-wise, season-wise crop production record. Crops are unit-checked
-before being pooled, yields are averaged across years, and both models are solved
-computationally and compared with the historical allocation. For Karnataka's Kharif season
-(1998--2019), the optimal plan raises output by 21.6\% on the same land, or meets historical
-output on 23.9\% less land.
+Government of India district-wise, season-wise crop production record. Before modelling, a
+duplicate copy of 212{,}373 records inflated $100\times$ is found and removed, and crops
+reported in nuts or bales are kept out of the pooled total. Yields are averaged across years,
+and both models are solved with PuLP and cross-checked with SciPy. For Karnataka's Kharif
+season (1998--2019), the optimal plan raises output by 21.6\% on the same land, or meets
+historical output on 23.9\% less land; the two dual values confirm the primal/dual pairing.
+Sensitivity analysis shows that a cautious $\pm10\%$ re-plan still gives about 6\%, and a
+comparison of 27 districts gives a median gain of 25.8\%. An interactive web interface runs
+both models for any state and season.
 \end{abstract}
 
 \begin{IEEEkeywords}
-linear programming, crop planning, land allocation, agricultural resource planning
+linear programming, crop planning, land allocation, agricultural resource planning,
+sensitivity analysis, duality
 \end{IEEEkeywords}
 
 % =====================================================================
@@ -88,24 +93,34 @@ The objectives are to:
 \begin{itemize}
   \item use the dataset's own Yield values as coefficients;
   \item formulate crop allocation as an LP in two forms, maximising output and minimising land~\cite{taha2017};
-  \item solve both computationally;
+  \item solve both computationally (PuLP and SciPy \texttt{linprog});
   \item compare the optimal allocation with the actual historical allocation.
 \end{itemize}
 
-The scope is a single state and a single season, with yields averaged over several years.
-Because the dataset has no cost or price data, the objective is output or land only, not
-profit or cost.
+The scope is:
+\begin{itemize}
+  \item a single state and a single season, with yields averaged over several years;
+  \item output or land only, not profit or cost, because the dataset has no cost or price data;
+  \item only crops reported in the same production unit, pooled into one LP (Section~\ref{sec:data}).
+\end{itemize}
 
 % =====================================================================
 \section{Literature Review and Research Gap}
 % =====================================================================
-Table~\ref{tab:lit} summarises the prior studies. All of them use a one-time survey of a
-single district and assume that prices are known. None draws its coefficients from a
-multi-year, multi-district government production record.
+Table~\ref{tab:lit} summarises the prior studies. LP has been applied to Indian district-level
+crop data~\cite{wankhade2012}, an LP plan has beaten a farmer's own plan~\cite{majeke2020},
+realistic gains of 3.75--15\% have been reported~\cite{supriya2022}, and paired cost and
+revenue models motivate a primal/dual pair of objectives~\cite{paidipati2017,liang2023}.
 
-We therefore build the LP strictly from \emph{area}, \emph{production} and \emph{yield},
-using output maximisation and land minimisation only. Cost and profit are left out rather
-than approximated, which keeps the model reproducible from a public dataset.
+\textbf{Gap.} All of these studies use a one-time survey of a single district and assume that
+prices are known, so they optimise profit directly. None draws its coefficients from a
+multi-year, multi-district government production record. What is missing is an LP built
+entirely from an existing public dataset, so that it is reproducible, and one that stays
+honest about what the data lacks.
+
+\textbf{Our positioning.} We build the LP strictly from \emph{area}, \emph{production} and
+\emph{yield}, using output maximisation and land minimisation only. Cost and profit are left
+out rather than approximated.
 
 \begin{table}[!t]
 \centering
@@ -134,22 +149,65 @@ scales. (c) Pooled yield after removing the duplicate copy, in t/ha.}
 \end{figure*}
 
 % =====================================================================
-\section{Dataset}
+\section{Dataset}\label{sec:data}
 % =====================================================================
 The source is the \emph{District-wise, Season-wise Crop Production Statistics} of the
-Ministry of Agriculture \& Farmers Welfare~\cite{moafw}. It has 575{,}879 rows and 8 fields:
-State, District, Crop Year (1997--2020), Season, Crop, Area (ha), Production and Yield, where
-Yield $=$ Production$/$Area.
+Ministry of Agriculture \& Farmers Welfare, published on data.gov.in and mirrored on
+Kaggle~\cite{moafw}. It has 575{,}879 rows and 8 fields covering all of India at district
+level:
+\begin{itemize}
+  \item \texttt{State\_Name}, \texttt{District\_Name}: location of cultivation;
+  \item \texttt{Crop\_Year}: 1997 to 2020--21;
+  \item \texttt{Season}: Kharif, Rabi, Summer, Whole Year, Autumn or Winter;
+  \item \texttt{Crop}: Rice, Wheat, Sugarcane, Banana, Cotton, \ldots;
+  \item \texttt{Area} (ha), \texttt{Production} and \texttt{Yield}, where Yield $=$ Production$/$Area.
+\end{itemize}
 
-\textbf{Data does not give us:} cost or price data, so no profit or cost objective is possible.
+Table~\ref{tab:sample} shows actual rows. The Coconut row is the reason crops must be
+unit-checked: its Production is counted in nuts, not weight, so its Yield is on a completely
+different scale from Rice or Arecanut.
 
-\textbf{Data quirks, checked before modelling (Table~\ref{tab:clean}):}
+\begin{table}[!t]
+\centering
+\caption{Actual rows from the dataset (A.\&N. Islands, Nicobars)}\label{tab:sample}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Year, season & Crop & Area (ha) & Production & Yield\\
+\midrule
+2000 Kharif & Arecanut & 1{,}254 & 2{,}000 & 1.60\\
+2000 Kharif & Rice & 102 & 321 & 3.15\\
+2001 Whole Year & Cashewnut & 719 & 192 & 0.27\\
+2001 Whole Year & Coconut & 18{,}190 & 64{,}430{,}000 & 3{,}542.06\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why this dataset}
+Earlier review feedback asked us not to propose a method the data cannot support, and not to
+leave a data quirk undiscovered until it breaks the model. Both checks were applied before
+anything was formulated.
+
+\textbf{The data gives us:} Area for the land constraint; Yield as the output coefficient; and
+multiple years and seasons, so coefficients are averaged rather than guessed. The record is
+government-sourced, district-level and multi-year, not a single snapshot.
+
+\textbf{The data does not give us:} any cost or price field, so no profit or cost objective is
+possible.
+
+\subsection{Data quirks and cleaning}
+The following quirks were found and handled before modelling (Table~\ref{tab:clean}):
 \begin{itemize}
   \item Some crops are counted, not weighed: Coconut in nuts, and Cotton, Jute and Mesta in
-        bales. They are excluded when crops are pooled into one output total.
-  \item 212{,}373 records appear twice. The second copy has Production exactly $100\times$ the
-        first (Fig.~\ref{fig:stacked}). The second copy is rescaled and the duplicate dropped.
-  \item After this fix, yields match Production in tonnes (rice 1.8--2.8\,t/ha).
+        bales. They are excluded when crops are pooled into one output total. A crop is also
+        excluded if its median yield is more than $250\times$ (or less than $1/250$) of the
+        median across crops.
+  \item The file is two copies stacked together: 212{,}373 records from row 236{,}378 onward
+        repeat earlier records with Production exactly $100\times$ larger (99.4\% of the pairs,
+        Fig.~\ref{fig:stacked}). The second block is rescaled and the duplicates dropped.
+  \item Rows with zero production (mostly unreported) and aggregate rows such as ``Total
+        foodgrain'' are dropped; 3{,}565 rows with spelling variants (e.g.\ Paddy) are merged.
+  \item After these fixes, yields match Production in tonnes (rice 1.8--2.8\,t/ha).
   \item 1997 and 2020 are partial years, so the analysis window is 1998--2019.
 \end{itemize}
 
@@ -170,41 +228,90 @@ Clean rows & 358{,}739\\
 \end{table}
 
 % =====================================================================
-\section{Formulation}
+\section{Decision Problems and Formulation}
 % =====================================================================
 For the crops $c$ grown in the chosen state and season, restricted to crops reported in the
 same production unit, let:
 \begin{itemize}
-  \item $x_c$ be the hectares given to crop $c$;
+  \item $x_c$ be the hectares given to crop $c$ (the decision variables);
   \item $y_c$ be its Yield averaged over the available years;
   \item $a_c$ and $m_c$ be its historical minimum and maximum area.
 \end{itemize}
 
-\textbf{Optimization 1 (maximise output):} given a fixed land budget $L$, how many hectares
-per crop maximise total production?
+\subsection{Coefficients from the data}
+Let $P_{c,t}$ and $A_{c,t}$ be the production and area of crop $c$ in year $t$, summed over
+the districts of the state, and let $T$ be the number of years. Then
+\begin{align}
+y_c&=\frac{1}{T}\sum_t \frac{P_{c,t}}{A_{c,t}},\qquad
+\bar A_c=\frac{1}{T}\sum_t A_{c,t}, \label{eq:coef}\\
+a_c&=\min_t A_{c,t},\qquad m_c=\max_t A_{c,t}. \notag
+\end{align}
+The historical land and output, $L=\sum_c\bar A_c$ and $D=\sum_c y_c\bar A_c$, are the
+default right-hand sides. A crop enters the LP only if it is reported in at least two-thirds
+of the years (15 of 22).
+
+\subsection{Optimization 1: maximise agricultural output}
+\emph{Q1. Given a fixed land budget $L$, how many hectares per crop maximise total production?}
 \begin{align}
 \max\ Z=\textstyle\sum_c y_c x_c \quad
 \text{s.t.}\ \textstyle\sum_c x_c\le L,\ \ a_c\le x_c\le m_c,\ \ x_c\ge0. \label{eq:o1}
 \end{align}
 
-\textbf{Optimization 2 (minimise land):} to guarantee a minimum production $D$, what is the
-smallest land footprint?
+\subsection{Optimization 2: minimise land for a production target}
+\emph{Q2. To guarantee a minimum total production $D$, what is the smallest land footprint?}
 \begin{align}
 \min\ \textstyle\sum_c x_c \quad
 \text{s.t.}\ \textstyle\sum_c y_c x_c\ge D,\ \ a_c\le x_c\le m_c,\ \ x_c\ge0. \label{eq:o2}
 \end{align}
 
-Both models use the same data and the same $y_c$; only the objective and the binding
-constraint are swapped, which is the primal/dual pairing for a resource-allocation LP.
-$L$ and $D$ default to the historical land and output.
+Table~\ref{tab:models} compares the two decision problems. Both use the same data and the
+same $y_c$; only the objective and the binding constraint are swapped, which is the standard
+primal/dual pairing for a resource-allocation LP~\cite{taha2017,paidipati2017}.
+
+\begin{table}[!t]
+\centering
+\caption{The two decision problems}\label{tab:models}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{1.45cm}p{3.15cm}p{3.15cm}@{}}
+\toprule
+ & Optimization 1 & Optimization 2\\
+\midrule
+Decision & $x_c$, hectares per crop & $x_c$, hectares per crop\\
+Objective & max $\sum_c y_c x_c$ & min $\sum_c x_c$\\
+Binding constraint & Land: $\sum_c x_c\le L$ & Target: $\sum_c y_c x_c\ge D$\\
+Bounds & $a_c\le x_c\le m_c$, $x_c\ge0$ & $a_c\le x_c\le m_c$, $x_c\ge0$\\
+Output & Optimal hectares and output per crop & Least-land allocation vs.\ history\\
+Dual & $\lambda^*$: output per extra ha & $\mu^*$: land per extra tonne\\
+Technique & Linear programming & Linear programming\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Structure of the solution}
+With a single shared constraint, \eqref{eq:o1} is a continuous knapsack. Every crop first
+receives its minimum $a_c$; the remaining land is then filled from the highest-yield crop
+downward, each crop up to $m_c$. The crop at which the land runs out is the single
+\emph{basic} crop, and its yield equals the land dual $\lambda^*$. Each crop's reduced cost
+is $y_c-\lambda^*$: crops above $\lambda^*$ sit at their maximum, crops below it at their
+minimum. By the same argument, the target dual of \eqref{eq:o2} satisfies $\mu^*=1/\lambda^*$
+when \eqref{eq:o1} is solved at the land that \eqref{eq:o2} uses.
+
+\subsection{Optional policy constraint}
+The interface (Section~\ref{sec:tool}) can also require that pulse crops $\mathcal P$ keep at
+least a share $s$ of the land used:
+\begin{align}
+\textstyle\sum_{c\in\mathcal P} x_c \;\ge\; s\sum_c x_c. \label{eq:pulse}
+\end{align}
+This is a linear constraint, so both models remain LPs. It is off by default ($s=0$), and all
+headline results below use $s=0$.
 
 % =====================================================================
-\section{Workflow and Tools}
+\section{Workflow, Tools and Interface}\label{sec:tool}
 % =====================================================================
-Fig.~\ref{fig:workflow} shows the workflow. Data handling uses Pandas and NumPy, the LPs
-are solved with PuLP and SciPy \texttt{linprog} (the two agree), visualisation uses
-Matplotlib and Plotly, and an interactive interface lets users upload data and run both
-models.
+Fig.~\ref{fig:workflow} shows the workflow, and Table~\ref{tab:tools} lists the tools. Data
+handling uses Pandas and NumPy. Both LPs are solved with PuLP (CBC solver) and cross-checked
+with SciPy \texttt{linprog} (HiGHS), which also returns the dual values; the two solvers agree
+on every case. Visualisation uses Matplotlib and Plotly.
 
 \begin{figure}[!t]
 \centering
@@ -225,6 +332,51 @@ models.
 \caption{Project workflow.}
 \label{fig:workflow}
 \end{figure}
+
+\begin{table}[!t]
+\centering
+\caption{Tools and technologies}\label{tab:tools}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Purpose & Tool\\
+\midrule
+Data and statistics & Pandas, NumPy\\
+Optimisation & PuLP (CBC), SciPy \texttt{linprog} (HiGHS)\\
+Visualisation & Matplotlib, Plotly\\
+Interface & Web app: FastAPI backend, Plotly.js frontend\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{What is analysed.} \emph{Yield analysis:} yield per hectare by crop, district and
+year, and a check of which crops share a weight unit before pooling. \emph{State and district
+comparison:} area against production district by district, and the crops each model expands.
+\emph{Before/after allocation:} the optimal hectares against history (Fig.~\ref{fig:opt1}).
+
+\textbf{Interactive interface.} The original plan listed Streamlit as an optional interface.
+It was built instead as a web application that uses the same solver code as this paper, so
+every number it shows matches the results below. The user picks a state and a season, and
+seven pages update: an India map of the output gain by state; a data profile with the
+cleaning log and yield trends; model inputs (land budget $L$, target $D$, the bounds, the
+yield estimate and the pulse share $s$ of \eqref{eq:pulse}); the results of both models; one
+crop's yield across all states; sensitivity; and a district map of the gains.
+
+\textbf{Work plan.} Table~\ref{tab:plan} lists the three review milestones; all are complete.
+
+\begin{table}[!t]
+\centering
+\caption{Work plan}\label{tab:plan}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lp{5.1cm}l@{}}
+\toprule
+Milestone & Deliverables & Status\\
+\midrule
+Review I & Problem, literature review, dataset check, LP formulation & Done\\
+Review II & State and season chosen, yields averaged, unit check, both LPs solved and compared with history & Done\\
+Review III & Sensitivity analysis, multi-district comparison, interface, final report & Done\\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{figure}[!t]
 \centering
@@ -257,8 +409,10 @@ excluded because they are reported in bales. Table~\ref{tab:res} summarises both
 \midrule
 \emph{Opt.~1, $L=6{,}125{,}458$ ha} & & \\
 \quad Output (t) & 9{,}729{,}947 & 11{,}831{,}631 (+21.6\%)\\
+\quad Land dual $\lambda^*$ (t/ha) & & 0.808\\
 \emph{Opt.~2, $D=9{,}729{,}947$ t} & & \\
 \quad Land (ha) & 6{,}125{,}458 & 4{,}663{,}668 ($-$23.9\%)\\
+\quad Target dual $\mu^*$ (ha/t) & & 0.3806\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -266,28 +420,56 @@ excluded because they are reported in bales. Table~\ref{tab:res} summarises both
 \textbf{Optimization 1.} The plan in Fig.~\ref{fig:opt1}:
 \begin{itemize}
   \item raises Potato, Onion, Maize, Rice, Ragi, Jowar and Soyabean to their historical maximum;
-  \item holds the lower-yield pulses, oilseeds and millets at their minimum.
+  \item holds the lower-yield pulses, oilseeds and millets at their minimum;
+  \item leaves Bajra as the basic crop.
 \end{itemize}
-The value of one extra hectare (the land dual) is 0.81\,t.
+The value of one extra hectare, the land dual $\lambda^*$, is 0.81\,t, which is Bajra's yield.
+PuLP and SciPy give the same optimum.
 
-\textbf{Optimization 2.} Historical output can be produced on 1.46 million ha less land.
-The dual of the target is 0.3806\,ha/t. This equals the reciprocal of the land dual of
-Opt.~1 at that land level, which confirms the primal/dual pairing.
+\textbf{Optimization 2.} Historical output can be produced on 1.46 million ha less land, with
+Rice as the basic crop. The dual of the target is $\mu^*=0.3806$\,ha/t. Solving
+Optimization~1 at that land gives $\lambda^*=2.627$, and $1/2.627=0.3806$, which confirms the
+primal/dual pairing.
 
 % =====================================================================
 \section{Sensitivity and Multi-District Comparison}
 % =====================================================================
 \textbf{Land budget.} Varying $L$ shows diminishing returns: optimal output rises ever more
-slowly, and the value of extra land falls in steps as crops reach their upper bounds
-(Fig.~\ref{fig:param}).
+slowly, and the value of extra land falls in steps (6.6, 2.9, 1.6, then 0.81\,t/ha) as crops
+reach their upper bounds (Fig.~\ref{fig:param}).
 
-\textbf{Bounds.} The gain depends on how far each crop may move. If each crop may change by
-only $\pm10\%$ from its historical area, the gain is 6.2\% more output or 5.0\% less land,
-which is consistent with the 3.75--15\% reported in~\cite{supriya2022}.
+\textbf{Bounds.} The gain depends on how far each crop may move. Table~\ref{tab:band} limits
+every crop to $\pm p\%$ of its historical area. At $\pm10\%$ the gain is 6.2\% more output or
+5.0\% less land, which is consistent with the 3.75--15\% reported in~\cite{supriya2022}.
 
-\textbf{Districts.} Solving both models for each of 27 districts gives a median gain of
-25.8\% (Fig.~\ref{fig:multi}). The gain is highest in the diverse dry districts (Koppal
-+65\%, Gadag +55\%) and lowest in the coastal rice districts (Udupi +0.2\%).
+\begin{table}[!t]
+\centering
+\caption{Gain when each crop may change by at most $\pm p\%$}\label{tab:band}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+$p$ & 5\% & 10\% & 20\% & 30\% & 50\%\\
+\midrule
+Output gain & 3.1\% & 6.2\% & 12.5\% & 18.7\% & 31.2\%\\
+Land saving & 2.5\% & 5.0\% & 10.0\% & 15.0\% & 25.0\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Yields.} Objective-coefficient ranging shows the plan holds while every expanded crop
+yields more than $\lambda^*=0.81$\,t/ha. Soyabean is the most fragile: a fall of only
+0.05\,t/ha would remove it from the expanded set. A uniform $-30\%$ yield shock only rescales
+output and moves no land, while a $-30\%$ shock to Soyabean alone moves 288{,}406\,ha.
+
+\textbf{Pulse share.} The unconstrained plan cuts land under pulses from 23.2\% to 12.6\%.
+Adding \eqref{eq:pulse} to keep the historical 23.2\% lowers the gain to 19.0\% more output or
+19.1\% less land; a 30\% floor gives 15.1\% or 13.6\%. This quantifies the output cost of
+keeping pulses in the crop mix.
+
+\textbf{Districts.} Solving both models separately for each of 27 districts gives a median gain
+of 25.8\% more output, or 24.4\% less land (Fig.~\ref{fig:multi}). The gain is highest in the
+diverse dry districts (Koppal +65\%, Gadag +55\%, Raichur +48\%) and lowest in the coastal
+rice districts (Udupi +0.2\%, Dakshina Kannada +0.6\%). It rises with the number of crops a
+district grows ($r=0.50$), and Maize is the crop most often expanded (16 of 27 districts).
 
 \begin{figure}[!t]
 \centering
@@ -297,14 +479,25 @@ which is consistent with the 3.75--15\% reported in~\cite{supriya2022}.
 \end{figure}
 
 % =====================================================================
+\section{Validation}
+% =====================================================================
+The pipeline was also run on a synthetic dataset of 1{,}664 rows with planted defects:
+duplicates, zero-production rows, aggregate rows, spelling variants, crops in nuts and bales,
+and a drought year. Every defect was caught. On the government data, the two solvers agree to
+within $10^{-9}$, and $\mu^*=1/\lambda^*$ holds as theory predicts.
+
+% =====================================================================
 \section{Assumptions and Limitations}
 % =====================================================================
 \begin{enumerate}
   \item \textbf{Production units must match.} Crops counted in nuts or bales are excluded
-        from the pooled total.
+        from the pooled total; this was confirmed from the data, not assumed.
   \item \textbf{Historical averages.} Yields are averaged over years; weather variation is not
-        modelled.
-  \item \textbf{Output, not profit.} No cost or price field exists in the dataset.
+        modelled in this base version.
+  \item \textbf{Output, not profit.} No cost or price field exists in the dataset, so a tonne
+        of onion counts the same as a tonne of pulses, which favours heavy crops.
+  \item \textbf{Bounds drive the result.} Historical min/max bounds give +21.6\%; $\pm10\%$
+        bounds give +6.2\%.
   \item \textbf{Not modelled:} soil quality, irrigation, labour, crop rotation, and price or
         demand shifts.
 \end{enumerate}
@@ -314,8 +507,11 @@ which is consistent with the 3.75--15\% reported in~\cite{supriya2022}.
 % =====================================================================
 Using only area, production and yield from the government record, the two LP models show
 that Karnataka's Kharif land could have produced 21.6\% more output, or the same output on
-23.9\% less land. Unit checks and duplicate-record checks applied before modelling were
-essential to obtaining valid coefficients.
+23.9\% less land; even a cautious $\pm10\%$ re-plan gives about 6\%. The dual values of the
+two models confirm their primal/dual relationship. Unit checks and duplicate-record checks
+applied before modelling were essential to obtaining valid coefficients. Future work can use
+price- or nutrition-weighted objectives, add rotation constraints, and build a stochastic LP
+from the yield variances already computed.
 
 % =====================================================================
 \begin{thebibliography}{00}

@@ -3,3 +3,5 @@ __pycache__/
 .ipynb_checkpoints/
 # local extracted copy of the Overleaf zip (stale duplicate of ieee_paper/main.tex)
 ieee_paper/ieee_paper_overleaf/
+.DS_Store
+.venv/

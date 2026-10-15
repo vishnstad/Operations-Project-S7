@@ -1,29 +1,29 @@
 """
-webapp/server.py — FastAPI backend for the CropLP web interface.
+webapp/server.py — backend for the crop-area allocation interface.
 
 All computation is delegated to ../or_core.py (the same engine used by the
-report and the IEEE paper), so every number shown in
-the browser is identical to the documented results.
+report), so every number shown in the browser matches the
+documented results. The data is the bundled Government of India record.
 
 Run:   python webapp/server.py        (opens http://127.0.0.1:8000)
 """
 from __future__ import annotations
 
-import asyncio
-import functools
-import io
+import difflib
+import json
+import math
 import os
+import re
 import sys
 import threading
-import uuid
 import webbrowser
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-import orjson
 import pandas as pd
 import plotly
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -33,513 +33,257 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import or_core as oc  # noqa: E402
 
-BUILTIN = {
-    "demo": dict(label="Synthetic demo dataset", path=ROOT / "sample_data" / "synthetic_crop_data_demo.csv",
-                 blurb="Fictional 'Demo Pradesh' — 6 districts, 3 seasons, 2008-2019, with planted data quirks."),
-    "mini": dict(label="Minimal farm file", path=ROOT / "sample_data" / "synthetic_minimal_farm.csv",
-                 blurb="Only 4 columns with different names — shows automatic column mapping."),
-    "gov": dict(label="Government of India dataset",
-                path=ROOT / "Indian Agriculture Crop Production and yield (GOV)" / "Indian_crop_production_yield_dataset.csv",
-                blurb="575,879 district-season-year records, 1997-2020 (data.gov.in)."),
-}
+GOV = ROOT / "Indian Agriculture Crop Production and yield (GOV)" / "Indian_crop_production_yield_dataset.csv"
+DISTRICT_GEO = HERE / "geo" / "india_districts.json"
 PLOTLY_JS = Path(plotly.__file__).parent / "package_data" / "plotly.min.js"
+DEFAULT_STATE, DEFAULT_SEASON = "Karnataka", "Kharif"
+# district boundaries are pre-2014, so some states' districts sit under an older parent
+GEO_PARENT = {"Telangana": "Andhra Pradesh", "Laddakh": "Jammu and Kashmir"}
+
+app = FastAPI(title="Optimal Crop-Area Allocation")
+_lock = threading.Lock()
+DB: dict = {}
 
 
-class ORJSON(Response):
-    media_type = "application/json"
-
-    def render(self, content) -> bytes:
-        return orjson.dumps(content, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
-
-
-def jr(fn):
-    """Return route results through orjson (handles numpy types, NaN -> null)."""
-    if asyncio.iscoroutinefunction(fn):
-        @functools.wraps(fn)
-        async def aw(*a, **k):
-            out = await fn(*a, **k)
-            return out if isinstance(out, Response) else ORJSON(out)
-        return aw
-
-    @functools.wraps(fn)
-    def w(*a, **k):
-        out = fn(*a, **k)
-        return out if isinstance(out, Response) else ORJSON(out)
-    return w
-
-
-app = FastAPI(title="CropLP")
-SESS: dict[str, dict] = {}
-_RAW_CACHE: dict[str, pd.DataFrame] = {}
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-def records(df: pd.DataFrame, cols=None, rnd=6):
-    if df is None or len(df) == 0:
-        return []
-    d = df if cols is None else df[[c for c in cols if c in df.columns]]
-    d = d.copy()
-    fl = d.select_dtypes(include="number").columns
-    d[fl] = d[fl].replace([np.inf, -np.inf], np.nan)
-    out = []
-    for r in d.to_dict("records"):
-        row = {}
-        for k, v in r.items():
-            if isinstance(v, (float, np.floating)):
-                row[k] = None if np.isnan(v) else round(float(v), rnd)
-            elif isinstance(v, (np.integer,)):
-                row[k] = int(v)
-            elif isinstance(v, (np.bool_,)):
-                row[k] = bool(v)
-            else:
-                row[k] = v
-        out.append(row)
-    return out
-
-
-def num(x):
-    if x is None:
+def _plain(x):
+    """numpy types -> Python, NaN/inf -> None, recursively."""
+    if isinstance(x, dict):
+        return {str(k): _plain(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_plain(v) for v in x]
+    if isinstance(x, np.generic):
+        x = x.item()
+    if isinstance(x, float) and not math.isfinite(x):
         return None
-    try:
-        x = float(x)
-    except (TypeError, ValueError):
-        return None
-    return None if (np.isnan(x) or np.isinf(x)) else x
+    return x
 
 
-def get_sess(sid: str) -> dict:
-    s = SESS.get(sid)
-    if s is None:
-        raise HTTPException(404, "Session expired — please load the data again.")
-    return s
+def J(content) -> Response:
+    return Response(json.dumps(_plain(content)), media_type="application/json")
 
 
-def new_session(raw: pd.DataFrame, name: str, source: str) -> dict:
-    sid = uuid.uuid4().hex
-    SESS[sid] = dict(raw=raw, name=name, source=source, data=None)
-    guess = oc.guess_column_map(raw.columns)
-    preview = raw.head(8).astype(object).where(raw.head(8).notna(), None)
-    return dict(sid=sid, name=name, source=source, rows=len(raw), columns=list(map(str, raw.columns)),
-                guess=guess, canonical=oc.CANONICAL, required=["Crop", "Area", "Production"],
-                preview=records(preview))
+def records(df: pd.DataFrame, cols, rnd=4):
+    d = df[cols].replace([np.inf, -np.inf], np.nan).astype(object)
+    d = d.where(d.notna(), None)
+    return [{k: round(v, rnd) if isinstance(v, float) else v for k, v in r.items()} for r in d.to_dict("records")]
 
 
 # ---------------------------------------------------------------------------
-# request models
+# data: read and cleaned once
 # ---------------------------------------------------------------------------
-class LoadReq(BaseModel):
-    name: str
-
-
-class Cleaning(BaseModel):
-    drop_zero: bool = True
-    merge_alias: bool = True
-    drop_agg: bool = True
-    reconcile: bool = True
-
-
-class PrepareReq(BaseModel):
-    sid: str
-    colmap: dict[str, str]
-    cleaning: Cleaning = Cleaning()
-
-
-class Scope(BaseModel):
-    state: str
-    season: str
-    districts: list[str] = []
-    years: list[int]
+def db() -> dict:
+    with _lock:
+        if not DB:
+            raw = pd.read_csv(GOV, low_memory=False)
+            data, rep = oc.clean(oc.standardise(raw, oc.guess_column_map(raw.columns)))
+            rpy = data.groupby("Crop_Year").size()
+            full = rpy[rpy >= 0.65 * rpy.median()].index           # drop partial years (1997, 2020)
+            years = (int(full.min()), int(full.max()))
+            win = oc.filter_scope(data, years=years)
+            area = win.groupby(["State_Name", "Season"])["Area"].sum()
+            seasons = {st: area[st].sort_values(ascending=False).index.tolist()
+                       for st in sorted(win["State_Name"].unique())}
+            DB.update(data=data, rep=rep, years=years, seasons=seasons)
+        return DB
 
 
 class Settings(BaseModel):
-    yield_method: str = "mean"
-    bound_mode: str = "historical"
-    band_pct: float = 30.0
-    min_years: int | None = None
-    ratio_thr: float = 250.0
+    """User-set model inputs. The defaults reproduce the report."""
+    land_pct: float = 100.0         # land available for Model 1, % of historical land
+    target_pct: float = 100.0       # production target for Model 2, % of historical output
+    bounds: str = "historical"      # "historical" (min..max area) or "band" (avg area +/- band_pct)
+    band_pct: float = 20.0
+    pulse_share: float = 0.0        # minimum % of land under pulses (0 = off)
+    yield_method: str = "mean"      # mean | median | weighted
+
+    def key(self):
+        return tuple(self.model_dump().values())
 
 
-class Ctx(BaseModel):
-    sid: str
-    scope: Scope
-    settings: Settings = Settings()
-    crops: list[str] | None = None
+def solve_scope(scope, years, st: Settings = Settings()):
+    """Unit check and LP coefficients for one state/season scope."""
+    n_years = years[1] - years[0] + 1
+    unit = oc.unit_check(scope)
+    pooled = unit.loc[unit["status"] == "Pool", "Crop"].tolist()
+    for frac in (0.67, 0.33):                                        # relax for sparsely reported scopes
+        min_years = max(1, round(frac * n_years))
+        coef = oc.apply_bounds(oc.build_coefficients(scope, pooled, st.yield_method, min_years), st.bounds, st.band_pct)
+        if len(coef) >= 2:
+            break
+    return unit, coef, min_years
 
 
-class OptReq(Ctx):
-    L: float | None = None
-    target_pct: float = 100.0
+def pulse_constraint(coef, st: Settings):
+    if st.pulse_share <= 0 or not coef["Crop"].isin(oc.PULSE_CROPS).any():
+        return None
+    return (frozenset(oc.PULSE_CROPS), st.pulse_share / 100)
 
 
-class SensReq(Ctx):
-    shock: float = -15.0
-    shock_crops: list[str] = []
+@lru_cache(maxsize=None)
+def district_shapes():
+    return json.loads(DISTRICT_GEO.read_text())["features"] if DISTRICT_GEO.exists() else []
 
 
-# ---------------------------------------------------------------------------
-# context builder shared by all analysis endpoints
-# ---------------------------------------------------------------------------
-def build_ctx(req: Ctx):
-    s = get_sess(req.sid)
-    data = s.get("data")
-    if data is None:
-        raise HTTPException(400, "Data not prepared yet.")
-    sc, st = req.scope, req.settings
-    years = tuple(sc.years)
-    n_years = max(1, years[1] - years[0] + 1)
-    min_years = st.min_years if st.min_years else max(1, round(0.67 * n_years))
-    min_years = min(min_years, n_years)
-    scope = oc.filter_scope(data, sc.state, sc.districts or None, sc.season, years)
-    if scope.empty:
-        raise HTTPException(400, "No records in this scope — widen the filters.")
-    unit = oc.unit_check(scope, st.ratio_thr)
-    pool_default = unit.loc[unit["status"] == "Pool", "Crop"].tolist()
-    crops = [c for c in (req.crops if req.crops is not None else pool_default) if c in set(unit["Crop"])]
-    coef_raw = oc.build_coefficients(scope, crops, st.yield_method, min_years)
-    coef = oc.apply_bounds(coef_raw, st.bound_mode, st.band_pct)
-    return dict(sess=s, data=data, scope=scope, unit=unit, pool_default=pool_default, crops=crops,
-                coef_raw=coef_raw, coef=coef, min_years=min_years, years=years)
+def _key(s):
+    return re.sub(r"[^a-z]", "", str(s).lower())
 
 
-def need_lp(c):
-    if len(c["coef"]) < 2:
-        raise HTTPException(400, "At least 2 crops with enough years of data are needed for an LP. "
-                                 "Add crops on the Crops page or widen the year window.")
-
-
-# ---------------------------------------------------------------------------
-# routes — data
-# ---------------------------------------------------------------------------
-@app.get("/api/builtin")
-@jr
-def builtin():
-    return [dict(key=k, label=v["label"], blurb=v["blurb"], available=v["path"].exists(),
-                 size_mb=round(v["path"].stat().st_size / 1e6, 1) if v["path"].exists() else None)
-            for k, v in BUILTIN.items()]
-
-
-@app.get("/api/sample/{key}")
-def sample(key: str):
-    if key not in ("demo", "mini"):
-        raise HTTPException(404)
-    p = BUILTIN[key]["path"]
-    return FileResponse(p, filename=p.name, media_type="text/csv")
-
-
-@app.post("/api/load")
-@jr
-def load(req: LoadReq):
-    if req.name not in BUILTIN:
-        raise HTTPException(404, "Unknown dataset")
-    b = BUILTIN[req.name]
-    if not b["path"].exists():
-        raise HTTPException(404, f"File not found: {b['path'].name}")
-    key = str(b["path"])
-    if key not in _RAW_CACHE:
-        _RAW_CACHE[key] = pd.read_csv(b["path"], low_memory=False)
-    return new_session(_RAW_CACHE[key], b["label"], req.name)
-
-
-@app.post("/api/upload")
-@jr
-async def upload(file: UploadFile = File(...)):
-    content = await file.read()
-    name = file.filename or "upload"
-    try:
-        if name.lower().endswith((".xlsx", ".xls")):
-            raw = pd.read_excel(io.BytesIO(content))
-        else:
-            # small files: sniff the delimiter (comma / semicolon / tab); big files: fast C parser
-            raw = pd.read_csv(io.BytesIO(content), sep=None, engine="python") \
-                if len(content) < 5_000_000 else pd.read_csv(io.BytesIO(content), low_memory=False)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"Could not read the file: {e}")
-    if raw.empty:
-        raise HTTPException(400, "The file has no rows.")
-    return new_session(raw, name, "upload")
-
-
-@app.post("/api/prepare")
-@jr
-def prepare(req: PrepareReq):
-    s = get_sess(req.sid)
-    colmap = {k: v for k, v in req.colmap.items() if v}
-    try:
-        df = oc.standardise(s["raw"], colmap)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    c = req.cleaning
-    data, rep = oc.clean(df, c.drop_zero, c.merge_alias, c.drop_agg, c.reconcile)
-    if data.empty:
-        raise HTTPException(400, "No usable rows remain after cleaning.")
-    s["data"] = data
-
-    hierarchy = {}
-    for st_name, g in data.groupby("State_Name"):
-        hierarchy[st_name] = dict(seasons=sorted(g["Season"].unique().tolist()),
-                                  districts=sorted(g["District_Name"].unique().tolist()),
-                                  rows=int(len(g)))
-    rpy = data.groupby("Crop_Year").size()
-    full = rpy[rpy >= 0.65 * rpy.median()].index
-    states = sorted(hierarchy)
-    default_state = "Karnataka" if "Karnataka" in hierarchy else max(hierarchy, key=lambda k: hierarchy[k]["rows"])
-    seasons = hierarchy[default_state]["seasons"]
-    default_season = "Kharif" if "Kharif" in seasons else seasons[0]
-    raw = s["raw"]
-    profile = [dict(column=str(cn), dtype=str(raw[cn].dtype), missing=int(raw[cn].isna().sum()),
-                    unique=int(raw[cn].nunique())) for cn in raw.columns]
-    return dict(
-        kpis=dict(rows_raw=rep.rows_in, rows_clean=rep.rows_out, states=len(hierarchy),
-                  districts=int(data["District_Name"].nunique()), crops=int(data["Crop"].nunique()),
-                  year_min=int(data["Crop_Year"].min()), year_max=int(data["Crop_Year"].max())),
-        cleaning=[dict(step=a, removed=b, why=w) for a, b, w in rep.steps],
-        stacked=rep.stacked, hierarchy=hierarchy, states=states,
-        default=dict(state=default_state, season=default_season,
-                     years=[int(full.min()), int(full.max())]),
-        rows_per_year=dict(x=rpy.index.tolist(), y=rpy.values.tolist()),
-        rows_per_season=data["Season"].value_counts().to_dict(),
-        profile=profile,
-        preview=records(data.head(200)),
-    )
+def district_geo(state, names):
+    """GeoJSON features for this state's districts, with ids matched to the dataset's district names."""
+    parent = GEO_PARENT.get(state, state)
+    pool = {_key(f["properties"]["district"]): f for f in district_shapes() if f["properties"]["state"] in (state, parent)}
+    feats = []
+    for name in names:
+        hit = difflib.get_close_matches(_key(name), pool, n=1, cutoff=0.72)
+        if hit:
+            f = pool.pop(hit[0])
+            feats.append({"type": "Feature", "id": name, "properties": {}, "geometry": f["geometry"]})
+    return {"type": "FeatureCollection", "features": feats}
 
 
 # ---------------------------------------------------------------------------
-# routes — analysis
+# routes
 # ---------------------------------------------------------------------------
-@app.post("/api/explore")
-@jr
-def explore(req: Ctx):
-    c = build_ctx(req)
-    data, scope, pool = c["data"], c["scope"], c["pool_default"]
-    sc = req.scope
-    sp = scope[scope["Crop"].isin(pool)]
-
-    # pooled yield over ALL years (quirk detector)
-    sb = oc.structural_break_check(
-        oc.filter_scope(data, sc.state, sc.districts or None, sc.season, None).query("Crop in @pool"))
-    jumps = [dict(year=int(r.Crop_Year), pct=float(r["YoY_change_%"])) for _, r in sb.iterrows()
-             if pd.notna(r["YoY_change_%"]) and abs(r["YoY_change_%"]) > 40]
-
-    agg = sp.groupby("Crop").agg(Area=("Area", "sum"), Production=("Production", "sum")).reset_index()
-    tot_area = agg["Area"].sum()
-    agg["share"] = agg["Area"] / tot_area if tot_area else 0
-    agg = agg.sort_values("Area", ascending=False)
-
-    # yield trend for the top-8 crops by area (frontend lets the user pick)
-    top8 = agg["Crop"].head(8).tolist()
-    yt = (oc.filter_scope(data, sc.state, sc.districts or None, sc.season, None)
-          .query("Crop in @top8").groupby(["Crop", "Crop_Year"])
-          .agg(P=("Production", "sum"), A=("Area", "sum")).reset_index())
-    yt["Yield"] = yt["P"] / yt["A"]
-    trend = {cr: dict(x=g["Crop_Year"].tolist(), y=g["Yield"].round(4).tolist()) for cr, g in yt.groupby("Crop")}
-
-    state_season = oc.filter_scope(data, sc.state, None, sc.season, tuple(sc.years))
-    ss = state_season[state_season["Crop"].isin(pool)]
-    dd = ss.groupby("District_Name").agg(Area=("Area", "sum"), Production=("Production", "sum"),
-                                         crops=("Crop", "nunique")).reset_index()
-    dd["Yield"] = dd["Production"] / dd["Area"]
-
-    hm = ss.groupby(["District_Name", "Crop"]).agg(P=("Production", "sum"), A=("Area", "sum")).reset_index()
-    hm["Yield"] = hm["P"] / hm["A"]
-    topc = ss.groupby("Crop")["Area"].sum().sort_values(ascending=False).index[:12].tolist()
-    piv = hm[hm["Crop"].isin(topc)].pivot(index="District_Name", columns="Crop", values="Yield")
-    piv = piv.reindex(columns=topc)
-    heat = dict(x=list(piv.columns), y=list(piv.index),
-                z=[[None if pd.isna(v) else round(float(v), 4) for v in row] for row in piv.values])
-
-    # best-yield crop per district & season (≥1% of the district-season area)
-    bs = oc.filter_scope(data, sc.state, None, None, tuple(sc.years))
-    bs = bs[bs["Crop"].isin(oc.unit_check(bs, req.settings.ratio_thr).query("status=='Pool'")["Crop"])]
-    g = bs.groupby(["District_Name", "Season", "Crop"]).agg(P=("Production", "sum"), A=("Area", "sum")).reset_index()
-    best = []
-    if not g.empty:
-        g["share"] = g["A"] / g.groupby(["District_Name", "Season"])["A"].transform("sum")
-        g = g[g["share"] >= 0.01]
-        g["Yield"] = g["P"] / g["A"]
-        b = g.loc[g.groupby(["District_Name", "Season"])["Yield"].idxmax()]
-        best = records(b.rename(columns={"District_Name": "District"})[["District", "Season", "Crop", "Yield"]])
-
-    cv = c["unit"].query("status=='Pool'").sort_values("cv", ascending=False)
-
-    insights = []
-    if len(agg):
-        t = agg.iloc[0]
-        insights.append(f"{t['Crop']} is the dominant crop, covering {100 * t['share']:.0f}% of the pooled area.")
-        top3 = agg.head(3)
-        insights.append(f"The top 3 crops ({', '.join(top3['Crop'])}) cover {100 * top3['share'].sum():.0f}% of the area.")
-    if len(dd) > 1:
-        hi, lo = dd.loc[dd["Yield"].idxmax()], dd.loc[dd["Yield"].idxmin()]
-        insights.append(f"Highest pooled yield: {hi['District_Name'].title()} ({hi['Yield']:.2f}/ha); "
-                        f"lowest: {lo['District_Name'].title()} ({lo['Yield']:.2f}/ha).")
-    if len(cv):
-        insights.append(f"Most unpredictable yield: {cv.iloc[0]['Crop']} (CV {cv.iloc[0]['cv']:.2f}).")
-
-    return dict(
-        insights=insights, jumps=jumps,
-        pooled=dict(x=sb["Crop_Year"].tolist(), y=sb["Pooled_yield"].round(4).tolist()),
-        top_crops=records(agg.head(15)), trend=trend, trend_default=top8[:3],
-        districts=records(dd), heat=heat, best=best,
-        cv=records(cv.head(20), ["Crop", "cv", "median_yield"]),
-    )
+@app.get("/api/meta")
+def meta():
+    d = db()
+    rep = d["rep"]
+    return J(dict(seasons=d["seasons"], state=DEFAULT_STATE, season=DEFAULT_SEASON, years=d["years"],
+                  cleaning=dict(rows_in=rep.rows_in, rows_out=rep.rows_out,
+                                steps=[dict(step=a, removed=b) for a, b, w in rep.steps if b > 0])))
 
 
-@app.post("/api/crops")
-@jr
-def crops(req: Ctx):
-    c = build_ctx(req)
-    coef = c["coef"]
-    out = dict(
-        unit=records(c["unit"], ["Crop", "records", "median_yield", "mean_yield", "cv", "ratio_to_pool_median",
-                                 "status", "reason"]),
-        pool_default=c["pool_default"], selected=c["crops"], min_years=c["min_years"],
-        coef=records(coef.rename(columns={"lo": "lp_lo", "hi": "lp_hi"})),
-        dropped=sorted(set(c["crops"]) - set(coef["Crop"])),
-    )
-    if len(coef) >= 2:
+@lru_cache(maxsize=32)
+def india(season: str, key: tuple):
+    """Both LPs for every state in one season, for the India map."""
+    d, st = db(), Settings(**dict(zip(Settings.model_fields, key)))
+    rows = []
+    for state in d["seasons"]:
+        scope = oc.filter_scope(d["data"], state, None, season, d["years"])
+        if scope.empty:
+            continue
+        _, coef, _ = solve_scope(scope, d["years"], st)
+        if len(coef) < 2:
+            continue
         L, D = oc.historical_baseline(coef)
-        out["baseline"] = dict(L=L, D=D)
-        out["feas"] = oc.feasibility_bounds(coef)
-    return out
+        share = pulse_constraint(coef, st)
+        r1 = oc.solve_max_output(coef, L * st.land_pct / 100, use_pulp=False, share=share)
+        r2 = oc.solve_min_land(coef, D * st.target_pct / 100, use_pulp=False, share=share)
+        if r1.ok and r2.ok and D > 0:
+            rows.append(dict(state=state, crops=len(coef), land=L, gain_pct=100 * (r1.objective - D) / D,
+                             saving_pct=100 * (L - r2.objective) / L))
+    return rows
 
 
-def interpret_max(r, D):
-    a = r.alloc
-    up = a[a["change_ha"] > 1].sort_values("change_ha", ascending=False)["Crop"].tolist()
-    dn = a[a["change_ha"] < -1].sort_values("change_ha")["Crop"].tolist()
-    basic = a[a["bound_status"].str.startswith("basic")]["Crop"].tolist()
-    lam = r.shadow_price
-    msgs = []
-    if up:
-        msgs.append(f"Give more land to {', '.join(up[:5])}{' and others' if len(up) > 5 else ''}.")
-    if dn:
-        msgs.append(f"Take land away from {', '.join(dn[:5])}{' and others' if len(dn) > 5 else ''}.")
-    if basic:
-        msgs.append(f"{basic[0]} is the 'marginal' crop: it absorbs whatever land is left, so its yield "
-                    f"({lam:,.3f}/ha) sets the value of one extra hectare.")
-    msgs.append(f"Every extra hectare of land would add about {lam:,.3f} units of output (shadow price λ*).")
-    if D:
-        msgs.append(f"Overall, the same land produces {100 * (r.objective - D) / D:+.1f}% compared with the "
-                    "historical crop mix.")
-    return msgs
+class IndiaReq(BaseModel):
+    season: str
+    settings: Settings = Settings()
 
 
-def lp_payload(r):
-    return dict(status=r.status, objective=num(r.objective), shadow=num(r.shadow_price),
-                scipy_objective=num(r.scipy_objective), scipy_shadow=num(r.scipy_shadow),
-                lp_text=r.lp_text, alloc=records(r.alloc))
+@app.post("/api/india")
+def india_route(req: IndiaReq):
+    return J(india(req.season, req.settings.key()))
 
 
-@app.post("/api/optimize/max")
-@jr
-def opt_max(req: OptReq):
-    c = build_ctx(req)
-    need_lp(c)
-    coef = c["coef"]
-    Lh, Dh = oc.historical_baseline(coef)
+@lru_cache(maxsize=64)
+def crop_by_state(crop: str, season: str):
+    """Area-weighted yield (sum P / sum A) and area of one crop in every state, for the crop map."""
+    d = db()
+    sc = oc.filter_scope(d["data"], None, None, season, d["years"])
+    g = sc[sc["Crop"] == crop].groupby("State_Name").agg(P=("Production", "sum"), A=("Area", "sum"))
+    g = g[g["A"] > 0]
+    n_years = d["years"][1] - d["years"][0] + 1
+    return [dict(state=st, yield_=r.P / r.A, area=r.A / n_years) for st, r in g.iterrows()]
+
+
+@app.get("/api/crop")
+def crop_route(crop: str, season: str):
+    return J(crop_by_state(crop, season))
+
+
+class RunReq(BaseModel):
+    state: str
+    season: str
+    settings: Settings = Settings()
+
+
+@app.post("/api/run")
+def run(req: RunReq):
+    d = db()
+    data, years = d["data"], d["years"]
+    n_years = years[1] - years[0] + 1
+    scope = oc.filter_scope(data, req.state, None, req.season, years)
+    if scope.empty:
+        raise HTTPException(400, f"No {req.season} records for {req.state}.")
+    st = req.settings
+    unit, coef, min_years = solve_scope(scope, years, st)
+    if len(coef) < 2:
+        raise HTTPException(400, f"{req.state} · {req.season}: fewer than 2 crops are reported in enough years "
+                                 "for an LP. Try another season.")
+
+    L0, D0 = oc.historical_baseline(coef)
+    L, D = L0 * st.land_pct / 100, D0 * st.target_pct / 100
     feas = oc.feasibility_bounds(coef)
-    L = req.L if req.L is not None else Lh
-    r = oc.solve_max_output(coef, L)
-    out = dict(L=L, L_hist=Lh, D_hist=Dh, feas=feas, result=lp_payload(r))
-    if r.ok:
-        out["gain_pct"] = 100 * (r.objective - Dh) / Dh if Dh else None
-        out["land_used"] = float(r.alloc["x_opt"].sum())
-        out["explain"] = interpret_max(r, Dh)
-    else:
-        out["explain"] = [f"The minimum areas alone need {feas['min_land']:,.0f} ha, "
-                          f"more than the {L:,.0f} ha available."]
-    return out
+    share = pulse_constraint(coef, st)
+    is_pulse = coef["Crop"].isin(oc.PULSE_CROPS)
+    limits = dict(land_min_pct=100 * feas["min_land"] / L0, target_max_pct=100 * feas["max_output"] / D0,
+                  pulse_hist_pct=100 * coef.loc[is_pulse, "hist_area"].sum() / L0,
+                  pulse_max_pct=100 * coef.loc[is_pulse, "hi"].sum() / (coef.loc[is_pulse, "hi"].sum() + coef.loc[~is_pulse, "lo"].sum()),
+                  has_pulses=bool(is_pulse.any()))
+
+    r1 = oc.solve_max_output(coef, L, share=share)
+    if not r1.ok:
+        why = (f"the crops' minimum areas alone need {limits['land_min_pct']:.0f}% of historical land"
+               if L < feas["min_land"] else f"{st.pulse_share:.0f}% pulses cannot be reached within the area limits "
+               f"(at most about {limits['pulse_max_pct']:.0f}%)")
+        raise HTTPException(400, f"Model 1 has no solution with {st.land_pct:.0f}% land: {why}.")
+    r2 = oc.solve_min_land(coef, D, share=share)
+    if not r2.ok:
+        why = (f"even with every crop at its maximum area, output reaches only {limits['target_max_pct']:.0f}% of history"
+               if D > feas["max_output"] else f"{st.pulse_share:.0f}% pulses cannot be reached within the area limits")
+        raise HTTPException(400, f"Model 2 has no solution with a {st.target_pct:.0f}% target: {why}.")
+    r1b = oc.solve_max_output(coef, r2.objective, use_pulp=False, share=share)
+    curve = oc.parametric_land(coef, np.linspace(feas["min_land"], feas["max_land"] * 1.05, 60), share=share)
+    band = oc.bound_band_sweep(coef, [0, 5, 10, 15, 20, 30, 40, 50], share=share)
+    dist = oc.multi_district(scope, coef["Crop"].tolist(), st.yield_method, st.bounds, st.band_pct, min_years, share=share)
+
+    # state profile: what is grown, how much, and how yields moved
+    pooled = set(coef["Crop"])
+    by_crop = scope.groupby("Crop")["Area"].sum().sort_values(ascending=False) / n_years
+    yearly = scope[scope["Crop"].isin(pooled)].groupby("Crop_Year").agg(A=("Area", "sum"), P=("Production", "sum"))
+    top = coef.sort_values("hist_area", ascending=False)["Crop"].head(5).tolist()
+    ty = scope[scope["Crop"].isin(top)].groupby(["Crop", "Crop_Year"]).agg(P=("Production", "sum"), A=("Area", "sum"))
+    trend = {c: dict(x=g.index.get_level_values(1).tolist(), y=(g["P"] / g["A"]).round(4).tolist())
+             for c, g in ty.groupby(level=0)}
+    all_years = oc.filter_scope(data, req.state, None, req.season).groupby("Crop_Year").size()
+
+    alloc_cols = ["Crop", "y_c", "a_c", "m_c", "hist_area", "x_opt", "change_ha", "bound_status"]
+    return J(dict(
+        state=req.state, season=req.season, years=years, min_years=min_years, unit="t", limits=limits,
+        pulse_active=share is not None, pulse_crops=coef.loc[is_pulse, "Crop"].tolist(),
+        profile=dict(records=len(scope), districts=len(dist) if len(dist) else int(scope["District_Name"].nunique()),
+                     crops=int(scope["Crop"].nunique()), area=float(yearly["A"].mean()), production=float(yearly["P"].mean())),
+        rows_per_year={int(y): int(n) for y, n in all_years.items()},
+        crop_area=[dict(Crop=c, area=a, pooled=c in pooled) for c, a in by_crop.head(15).items()],
+        yearly=dict(x=yearly.index.tolist(), area=yearly["A"].tolist(), prod=yearly["P"].tolist()),
+        trend=trend,
+        excluded=records(unit[unit["status"] == "Exclude"], ["Crop", "reason"]),
+        coef=records(coef, ["Crop", "y_c", "yield_sd", "a_c", "m_c", "hist_area", "years"]),
+        opt1=dict(L=L, L_hist=L0, D_hist=D0, Z=r1.objective, lam=r1.shadow_price, scipy_Z=r1.scipy_objective,
+                  gain_pct=100 * (r1.objective - D0) / D0, alloc=records(r1.alloc, alloc_cols)),
+        opt2=dict(D=D, D_hist=D0, L_hist=L0, land=r2.objective, mu=r2.shadow_price, saving_pct=100 * (L0 - r2.objective) / L0,
+                  inv_lam=1 / r1b.shadow_price if r1b.ok and r1b.shadow_price else None,
+                  alloc=records(r2.alloc, alloc_cols)),
+        curve=dict(L=curve["L"].tolist(), Z=curve["Z"].tolist(), lam=curve["shadow_price"].tolist()),
+        band=records(band, ["band_pct", "output_gain_pct", "land_saving_pct"]),
+        districts=records(dist, ["District", "crops", "output_gain_pct", "land_saving_pct"]) if len(dist) > 1 else [],
+        district_geo=district_geo(req.state, dist["District"].tolist()) if len(dist) > 1 else None,
+    ))
 
 
-@app.post("/api/optimize/min")
-@jr
-def opt_min(req: OptReq):
-    c = build_ctx(req)
-    need_lp(c)
-    coef = c["coef"]
-    Lh, Dh = oc.historical_baseline(coef)
-    feas = oc.feasibility_bounds(coef)
-    D = Dh * req.target_pct / 100
-    r = oc.solve_min_land(coef, D)
-    out = dict(D=D, L_hist=Lh, D_hist=Dh, feas=feas, result=lp_payload(r))
-    if r.ok:
-        out["saving_ha"] = Lh - r.objective
-        out["saving_pct"] = 100 * (Lh - r.objective) / Lh
-        a = r.alloc
-        basic = a[a["bound_status"].str.startswith("basic")]["Crop"].tolist()
-        r1b = oc.solve_max_output(coef, r.objective, use_pulp=False)
-        out["duality"] = dict(L=r.objective, Z=num(r1b.objective), lam=num(r1b.shadow_price),
-                              inv_lam=num(1 / r1b.shadow_price) if r1b.ok and r1b.shadow_price else None,
-                              mu=num(r.shadow_price))
-        out["explain"] = [
-            f"The target of {D:,.0f} can be met on {r.objective:,.0f} ha — "
-            f"{out['saving_ha']:,.0f} ha ({out['saving_pct']:.1f}%) less than historically used.",
-            (f"{basic[0]} is the marginal crop; each extra unit of target needs {r.shadow_price:.5f} ha "
-             "(shadow price μ*)." if basic else
-             f"Each extra unit of target needs {r.shadow_price:.5f} ha (shadow price μ*)."),
-            "The freed land could be left fallow, used for other seasons' crops, or for non-farm needs.",
-        ]
-    else:
-        out["explain"] = [f"Even with every crop at its maximum area the output is only "
-                          f"{feas['max_output']:,.0f}."]
-    return out
-
-
-@app.post("/api/sensitivity")
-@jr
-def sensitivity(req: SensReq):
-    c = build_ctx(req)
-    need_lp(c)
-    coef = c["coef"]
-    Lh, Dh = oc.historical_baseline(coef)
-    feas = oc.feasibility_bounds(coef)
-    pl = oc.parametric_land(coef, np.linspace(feas["min_land"], feas["max_land"] * 1.05, 80))
-    pt = oc.parametric_target(coef, np.linspace(feas["min_output"], feas["max_output"], 60))
-    rg, lam = oc.yield_ranging(coef, Lh)
-    base = oc.solve_max_output(coef, Lh, use_pulp=False)
-    rs = oc.yield_shock(coef, Lh, req.shock, req.shock_crops or None)
-    moved = float((rs.alloc["x_opt"] - base.alloc["x_opt"]).abs().sum() / 2) if rs.ok and base.ok else None
-    shock_alloc = []
-    if rs.ok and base.ok:
-        m = base.alloc[["Crop", "x_opt"]].merge(rs.alloc[["Crop", "x_opt"]], on="Crop", suffixes=("_base", "_shock"))
-        shock_alloc = records(m)
-    bb = oc.bound_band_sweep(c["coef_raw"], [0, 5, 10, 15, 20, 30, 40, 50, 75, 100])
-    return dict(
-        L_hist=Lh, D_hist=Dh,
-        land=records(pl), target=records(pt),
-        ranging=records(rg), lam=num(lam),
-        shock=dict(pct=req.shock, base=num(base.objective), shocked=num(rs.objective),
-                   change_pct=num(100 * (rs.objective - base.objective) / base.objective) if rs.ok else None,
-                   moved_ha=moved, alloc=shock_alloc),
-        band=records(bb),
-    )
-
-
-@app.post("/api/districts")
-@jr
-def districts(req: Ctx):
-    c = build_ctx(req)
-    sc, st = req.scope, req.settings
-    md_scope = oc.filter_scope(c["data"], sc.state, None, sc.season, tuple(sc.years))
-    md = oc.multi_district(md_scope, c["coef"]["Crop"].tolist() or c["crops"], st.yield_method,
-                           st.bound_mode, st.band_pct, c["min_years"])
-    if md.empty:
-        return dict(rows=[], summary=None)
-    summary = dict(n=len(md), median_gain=float(md["output_gain_pct"].median()),
-                   median_saving=float(md["land_saving_pct"].median()),
-                   extra_output=float((md["opt_output"] - md["hist_output"]).sum()),
-                   best=md.iloc[0]["District"], worst=md.iloc[-1]["District"])
-    return dict(rows=records(md), summary=summary)
-
-
-# ---------------------------------------------------------------------------
-# static frontend
-# ---------------------------------------------------------------------------
 @app.get("/vendor/plotly.min.js")
 def plotly_js():
-    return FileResponse(PLOTLY_JS, media_type="application/javascript",
-                        headers={"Cache-Control": "max-age=86400"})
+    return FileResponse(PLOTLY_JS, media_type="application/javascript", headers={"Cache-Control": "max-age=86400"})
 
 
 @app.get("/")
@@ -555,7 +299,8 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
     url = f"http://127.0.0.1:{port}"
+    threading.Thread(target=db, daemon=True).start()  # read the dataset while the browser opens
     if "--no-browser" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  CropLP is running at {url}   (Ctrl+C to stop)\n")
+    print(f"\n  Running at {url}   (Ctrl+C to stop)\n")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
