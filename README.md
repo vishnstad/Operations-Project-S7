@@ -11,7 +11,7 @@ This repository contains the full implementation of the approach in
 * the Review-III extensions (sensitivity analysis and multi-district comparison);
 * an interactive web app with a simple tab-by-tab interface. Any CSV or Excel file can be uploaded, and every insight, plot and optimisation is recomputed live. It works fully offline.
 
-The full write-up is in **[REPORT.md](REPORT.md)**. An **IEEE-format LaTeX paper** with all figures is in **[ieee_paper/](ieee_paper/README.md)**; upload `ieee_paper/ieee_paper_overleaf.zip` to Overleaf to compile it.
+The full write-up is in **[REPORT.md](REPORT.md)**. To learn the project from scratch (every equation, graph and code line explained), read **[STUDY_GUIDE.md](STUDY_GUIDE.md)**. An **IEEE-format LaTeX paper** with all figures is in **[ieee_paper/](ieee_paper/README.md)**; upload `ieee_paper/ieee_paper_overleaf.zip` to Overleaf to compile it.
 
 ---
 
@@ -51,7 +51,7 @@ Project/
 ├── generate_synthetic_data.py     Builds sample_data/*.csv
 ├── run_case_study.py              Builds results/* used in REPORT.md
 ├── requirements.txt · run_app.bat
-├── README.md · REPORT.md
+├── README.md · REPORT.md · STUDY_GUIDE.md
 ├── ieee_paper/                    IEEE LaTeX paper (main.tex), 4 figures, Overleaf zip
 ├── sample_data/
 │   ├── synthetic_crop_data_demo.csv    "Demo Pradesh": 6 districts × 3 seasons × 2008-2019, with planted quirks
