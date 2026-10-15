@@ -627,8 +627,7 @@ PAGES.method = function () {
 
 // ================================================================== boot
 $("#newDataBtn").onclick = () => resetAll();
-// Deep links, e.g. /?load=demo&page=max  or  /?load=gov&page=districts&theme=dark
+// Deep links, e.g. /?load=demo&page=max  or  /?load=gov&page=districts
 const QP = new URLSearchParams(location.search);
-if (QP.get("theme")) document.documentElement.dataset.theme = QP.get("theme");
 S.autoPage = { data: "home" }[QP.get("page")] || QP.get("page");
 if (QP.get("load")) loadBuiltin(QP.get("load")); else go(S.autoPage === "method" ? "method" : "home");

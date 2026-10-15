@@ -30,7 +30,7 @@ Your browser opens **<http://127.0.0.1:8000>** automatically. Press `Ctrl+C` in 
 |---|---|
 | <http://127.0.0.1:8000/?load=demo> | Demo dataset, Data tab |
 | <http://127.0.0.1:8000/?load=gov&page=max> | Government dataset, Maximise-output page (Karnataka · Kharif · 1998–2019) |
-| <http://127.0.0.1:8000/?load=demo&page=whatif&theme=dark> | Sensitivity tab in dark mode |
+| <http://127.0.0.1:8000/?load=demo&page=whatif> | Demo dataset, Sensitivity tab |
 
 Valid `page` values are `data`, `explore`, `crops`, `max`, `min`, `whatif` (Sensitivity), `districts` and `method`.
 

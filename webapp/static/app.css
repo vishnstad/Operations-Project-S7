@@ -1,4 +1,4 @@
-/* Crop-Area Allocation — plain, flat styles (light + dark) */
+/* Crop-Area Allocation — plain, flat styles (white theme) */
 :root {
   color-scheme: light;
   --bg: #ffffff;
@@ -17,21 +17,6 @@
   --font: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   --mono: Consolas, "Cascadia Code", Menlo, monospace;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #151816; --panel: #1d211e; --border: #333a35; --text: #e9ece8; --text-2: #a7b0a9;
-    --brand: #47b57f; --accent: #3987e5; --accent-2: #d95926; --good: #5cc48c; --bad: #ef7a7a;
-    --warn-bg: #30290f; --bad-bg: #3a1c1c;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #151816; --panel: #1d211e; --border: #333a35; --text: #e9ece8; --text-2: #a7b0a9;
-  --brand: #47b57f; --accent: #3987e5; --accent-2: #d95926; --good: #5cc48c; --bad: #ef7a7a;
-  --warn-bg: #30290f; --bad-bg: #3a1c1c;
-}
-
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); }
 h1 { font-size: 22px; margin: 0 0 4px; }
