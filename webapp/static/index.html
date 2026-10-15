@@ -3,89 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CropLP · Optimal Crop-Area Allocation</title>
-<meta name="description" content="Linear-programming decision support for crop-area allocation using district-level crop production data.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f7a4d'/%3E%3Cpath d='M16 25V12m0 0c0-4 3-6 7-6 0 4-3 6-7 6zm0 4c0-4-3-6-7-6 0 4 3 6 7 6z' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<title>Crop-Area Allocation (LP)</title>
+<meta name="description" content="Linear-programming crop-area allocation using district-level crop production data.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231f7a4d'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/vendor/plotly.min.js"></script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="logo">
-    <div class="logo-mark">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 21V9m0 0c0-4 3-6 7-6 0 4-3 6-7 6zm0 4c0-4-3-6-7-6 0 4 3 6 7 6z"/></svg>
-    </div>
-    <div>CropLP<small>Optimal Crop-Area Allocation</small></div>
+<header class="top">
+  <div class="title">
+    <b>Optimal Crop-Area Allocation</b>
+    <span class="muted">Linear Programming · Operations Research</span>
   </div>
-  <span class="chip hidden" id="dataChip"><span class="dot"></span><span id="dataChipText"></span></span>
-  <div class="spacer"></div>
-  <button class="btn ghost sm hidden" id="newDataBtn" title="Load a different dataset">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-    New data
-  </button>
-  <button class="icon-btn" id="helpBtn" title="Glossary & help" aria-label="Help">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>
-  </button>
-  <button class="icon-btn" id="themeBtn" title="Toggle light / dark" aria-label="Theme">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-  </button>
-  <div class="progress" id="progress"></div>
+  <span class="muted small" id="dataName"></span>
+  <button class="btn hidden" id="newDataBtn">Load different data</button>
 </header>
 
-<div class="shell">
-  <nav class="sidebar" id="sidebar">
-    <div class="nav-label">Workflow</div>
-    <button class="nav-item active" data-page="home"><span class="nav-num">1</span><span class="nav-text"><b>Load data</b><span>Upload or pick a dataset</span></span></button>
-    <button class="nav-item" data-page="data" disabled><span class="nav-num">2</span><span class="nav-text"><b>Data quality</b><span>What we cleaned & why</span></span></button>
-    <button class="nav-item" data-page="explore" disabled><span class="nav-num">3</span><span class="nav-text"><b>Explore</b><span>Yields, trends, districts</span></span></button>
-    <button class="nav-item" data-page="crops" disabled><span class="nav-num">4</span><span class="nav-text"><b>Crops & inputs</b><span>Unit check, LP coefficients</span></span></button>
-    <div class="nav-label" style="margin-top:12px">Optimise</div>
-    <button class="nav-item" data-page="max" disabled><span class="nav-num">5</span><span class="nav-text"><b>Maximise output</b><span>Best use of fixed land</span></span></button>
-    <button class="nav-item" data-page="min" disabled><span class="nav-num">6</span><span class="nav-text"><b>Minimise land</b><span>Least land for a target</span></span></button>
-    <button class="nav-item" data-page="whatif" disabled><span class="nav-num">7</span><span class="nav-text"><b>What-if analysis</b><span>Sensitivity & shocks</span></span></button>
-    <button class="nav-item" data-page="districts" disabled><span class="nav-num">8</span><span class="nav-text"><b>Compare districts</b><span>Where re-planning pays</span></span></button>
-    <div class="nav-label" style="margin-top:12px">Reference</div>
-    <button class="nav-item" data-page="method"><span class="nav-num">?</span><span class="nav-text"><b>How it works</b><span>Model & assumptions</span></span></button>
-    <div class="side-foot">
-      Operations Research project · Linear Programming on Govt. of India district crop data.<br>
-      <span class="muted">Solvers: PuLP-CBC, cross-checked with SciPy-HiGHS.</span>
-    </div>
-  </nav>
+<nav class="tabs" id="tabs">
+  <button data-page="home" class="on">1. Data</button>
+  <button data-page="explore" disabled>2. Explore</button>
+  <button data-page="crops" disabled>3. Crops</button>
+  <button data-page="max" disabled>4. Maximise output</button>
+  <button data-page="min" disabled>5. Minimise land</button>
+  <button data-page="whatif" disabled>6. Sensitivity</button>
+  <button data-page="districts" disabled>7. Districts</button>
+  <button data-page="method">Model</button>
+</nav>
 
-  <main>
-    <!-- scope bar: shown once data is ready -->
-    <div class="scopebar hidden" id="scopebar">
-      <div class="field"><label for="selState">State</label><select class="select" id="selState"></select></div>
-      <div class="field"><label for="selSeason">Season</label><select class="select" id="selSeason"></select></div>
-      <div class="field"><span class="field-label">Districts</span>
-        <div class="ms" id="msDistricts">
-          <button class="select ms-btn" id="msBtn" type="button">All districts</button>
-          <div class="ms-pop hidden" id="msPop">
-            <input class="input" id="msSearch" placeholder="Search districts…">
-            <div class="ms-list" id="msList"></div>
-            <div class="ms-foot"><button class="btn ghost sm" id="msClear" type="button">Clear (use all)</button><button class="btn primary sm" id="msApply" type="button">Apply</button></div>
-          </div>
-        </div>
-      </div>
-      <div class="field"><span class="field-label">Years averaged</span>
-        <div class="years"><select class="select" id="selY0"></select><span class="muted">to</span><select class="select" id="selY1"></select></div>
-      </div>
-      <div class="grow"></div>
-      <button class="btn" id="settingsBtn" type="button">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
-        Model settings
-      </button>
-    </div>
-
-    <div id="view"></div>
-  </main>
+<div class="scope hidden" id="scope">
+  <label>State <select id="selState"></select></label>
+  <label>Season <select id="selSeason"></select></label>
+  <label>District <select id="selDistrict"></select></label>
+  <label>Years <select id="selY0"></select> to <select id="selY1"></select></label>
 </div>
 
-<div class="toasts" id="toasts"></div>
-<div class="tip hidden" id="tip"></div>
-<div id="overlay"></div>
+<main id="view"></main>
 
+<div class="toasts" id="toasts"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

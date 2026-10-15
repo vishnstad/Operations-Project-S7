@@ -96,7 +96,7 @@ Both models were run separately for each of 27 districts. The median gain is **+
 
 ## 7. Validation and tool
 * **Synthetic data** ("Demo Pradesh", 1,664 rows) contains planted defects: duplicates, zero rows, aggregates, aliases, nut and bale units, and a drought year. All of them are caught.
-* **CropLP web app** (`python webapp/server.py`) is a guided interface. Users can upload any CSV or Excel file, adjust the models with sliders, read plain-English explanations, run what-if analysis and compare districts. It runs on the same engine as this report, so the numbers are identical.
+* **Web app** (`python webapp/server.py`) has a simple tab-by-tab interface. Users can upload any CSV or Excel file, adjust the models with sliders, read plain-English explanations, run sensitivity analysis and compare districts. It runs on the same engine as this report, so the numbers are identical.
 
 ## 8. Limitations
 * **Weight objective:** a tonne of onion counts the same as a tonne of pulses, so heavy crops are favoured.
